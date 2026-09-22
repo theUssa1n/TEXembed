@@ -1,0 +1,30 @@
+[package]
+name = "texembed"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+winres = "0.1"
+
+[dependencies]
+anyhow = { version = "1.0.69", features = ["backtrace"] }
+byteorder = "1.4.3"
+num-traits = "0.2.15"
+rfd = "0.14.0"
+eframe = "0.29.0"
+egui = "0.29.0"
+image = { version = "0.25.0", features = ["dds"] }
+image_dds = "0.7.2"
+ddsfile = "0.5.2"
+chrono = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+incremental = false
+strip = true
+overflow-checks = false
+debug = false
+debug-assertions = false
