@@ -451,40 +451,91 @@ fn sum_old_texture_data(cursor: &mut Cursor<&[u8]>, header: TexturesHeader) -> R
     Ok(sum)
 }
 
-pub fn load_textures_name_list(path: &PathBuf) -> Result<Vec<String>> {
+/// A texture entry whose pixel data lives in an external `.streamtex` file.
+///
+/// Split/Second marks such entries with a catalog `texture_data_size` of `0`;
+/// the payload is not stored inline but in the sibling `<name>.streamtex`
+/// file. The static record fields describe the payload shape and are what
+/// allows the entry to be paired with a `.streamtex` record, since entries of
+/// both kinds are interleaved in the file and a catalog index is not stable
+/// across assets.
+#[derive(Clone, Debug)]
+pub struct StreamedTextureEntry {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub sides: u32,
+    pub mipmap_count: u32,
+    /// Game pixel-format code (`0x21` DXT1, `0x24` BC3, `0x02` A8R8G8B8, ...).
+    pub pixel_format: u32,
+}
+
+/// Collects every streamed texture entry of a `.textures` file, in file order.
+///
+/// Only catalogs without inline data (`texture_data_size == 0`) are considered,
+/// so the returned list is not polluted by the embedded textures that are
+/// stored next to them (which is what made a flat name list unreliable).
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or its binary layout cannot be
+/// parsed.
+pub fn load_streamed_texture_entries(path: &PathBuf) -> Result<Vec<StreamedTextureEntry>> {
     let original_bytes = fs::read(path)?;
     let mut cursor = Cursor::new(original_bytes.as_slice());
-    let header = read_textures_header(&mut cursor, "Textures name list")?;
+    let header = read_textures_header(&mut cursor, "Streamed texture entries")?;
     let names_hashmap = read_name_table(&mut cursor, &original_bytes, header)?;
     let cat_off = read_u32_as_usize(header.cat_off, "catalog offset")?;
     let cat_count = read_u32_as_usize(header.cat_count, "catalog count")?;
-    let mut names = Vec::new();
+    let mut entries = Vec::new();
 
     for i in 0..cat_count {
         let cat_ptr = BASE_OFFSET + cat_off + i * 16;
         cursor.set_position(cat_ptr as u64);
-        let _tex_data_size = cursor.read_u32::<LittleEndian>()?;
+        let tex_data_size = cursor.read_u32::<LittleEndian>()?;
         let _unk = cursor.read_u32::<LittleEndian>()?;
         let entry_count = read_u32_as_usize(cursor.read_u32::<LittleEndian>()?, "entry count")?;
         let entries_offset =
             read_u32_as_usize(cursor.read_u32::<LittleEndian>()?, "entries offset")?;
 
+        if tex_data_size != 0 {
+            continue;
+        }
+
         for e in 0..entry_count {
             let entry_ptr = BASE_OFFSET + entries_offset + e * 12;
             cursor.set_position(entry_ptr as u64);
             let rec_off = read_u32_as_usize(cursor.read_u32::<LittleEndian>()?, "record offset")?;
+            let _unk_off = cursor.read_u32::<LittleEndian>()?;
+            let _data_off = cursor.read_u32::<LittleEndian>()?;
             let rec_ptr = BASE_OFFSET + rec_off;
             cursor.set_position((rec_ptr + 4) as u64);
             let id = cursor.read_u32::<LittleEndian>()?;
+            cursor.set_position((rec_ptr + 12) as u64);
+            let pixel_format = cursor.read_u32::<LittleEndian>()?;
+            cursor.set_position((rec_ptr + 16) as u64);
+            let sides = cursor.read_u32::<LittleEndian>()?;
+            cursor.set_position((rec_ptr + 20) as u64);
+            let mipmap_count = cursor.read_u32::<LittleEndian>()?;
+            cursor.set_position((rec_ptr + 24) as u64);
+            let width = cursor.read_u32::<LittleEndian>()?;
+            let height = cursor.read_u32::<LittleEndian>()?;
             let name = match names_hashmap.get(&id) {
                 Some(name) => name.clone(),
                 None => format!("{id:08X}"),
             };
-            names.push(format!("{name}.dds"));
+            entries.push(StreamedTextureEntry {
+                name: format!("{name}.dds"),
+                width,
+                height,
+                sides,
+                mipmap_count,
+                pixel_format,
+            });
         }
     }
 
-    Ok(names)
+    Ok(entries)
 }
 
 /// Loads a `.textures` file and extracts embedded DDS payloads.
@@ -555,7 +606,7 @@ pub fn save_textures_file(texture_file: &TextureFile, path: &PathBuf) -> Result<
 /// Known codes: `0x21` = DXT1, `0x24` = DXT4/DXT5 (BC3), `0x02` =
 /// A8R8G8B8 (uncompressed 32-bit). The remaining codes follow the same
 /// `0x20 + family` pattern.
-fn dds_record_pixel_format(dds_bytes: &[u8]) -> u32 {
+pub(crate) fn dds_record_pixel_format(dds_bytes: &[u8]) -> u32 {
     if dds_bytes.len() < 128 {
         return 0;
     }
