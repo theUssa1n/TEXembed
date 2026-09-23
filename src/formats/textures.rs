@@ -44,6 +44,21 @@ fn usize_to_u32(value: usize, label: &str) -> Result<u32> {
         .map_err(|_| anyhow!("[Textures file] {label} does not fit in u32: {value}"))
 }
 
+/// Returns the absolute end offset of the header/table region, rejecting a
+/// `table_size` that would reach past the end of the file. Guards the header
+/// slice so a corrupt or externally-modded size cannot panic on save.
+fn checked_header_end(bytes_len: usize, table_size: usize, context: &str) -> Result<usize> {
+    let end = BASE_OFFSET
+        .checked_add(table_size)
+        .ok_or_else(|| anyhow!("[{context}] Header table size overflow"))?;
+    if end > bytes_len {
+        return Err(anyhow!(
+            "[{context}] Header table size {table_size} reaches past the end of the file ({bytes_len} bytes)"
+        ));
+    }
+    Ok(end)
+}
+
 fn read_textures_header(cursor: &mut Cursor<&[u8]>, context: &str) -> Result<TexturesHeader> {
     let magic = cursor.read_u32::<LittleEndian>()?;
     if magic != TEXTURES_MAGIC {
@@ -428,6 +443,13 @@ fn update_record_dimensions(
 
         let (width, height, mipmap_count, _) = parse_dds_header(dds.bytes.as_ref())?;
         let rec_ptr = BASE_OFFSET + rec_off;
+        // Keep the record's pixel-format code in sync with the (possibly
+        // replaced) DDS header, so a format change is reflected on save.
+        let pf = dds_record_pixel_format(dds.bytes.as_ref());
+        if pf != 0 {
+            header_mut_cursor.set_position(rec_ptr as u64 + 12);
+            header_mut_cursor.write_u32::<LittleEndian>(pf)?;
+        }
         header_mut_cursor.set_position(rec_ptr as u64 + 20);
         header_mut_cursor.write_u32::<LittleEndian>(mipmap_count)?;
         header_mut_cursor.write_u32::<LittleEndian>(width)?;
@@ -570,7 +592,8 @@ pub fn save_textures_file(texture_file: &TextureFile, path: &PathBuf) -> Result<
     let original_bytes = &texture_file.original_bytes;
     let mut cursor = Cursor::new(original_bytes.as_slice());
     let header = read_textures_header(&mut cursor, "Save Textures")?;
-    let mut header_bytes = original_bytes[0..BASE_OFFSET + header.table_size].to_vec();
+    let header_end = checked_header_end(original_bytes.len(), header.table_size, "Save Textures")?;
+    let mut header_bytes = original_bytes[..header_end].to_vec();
     let mut header_mut_cursor = Cursor::new(&mut header_bytes);
     let (embedded_files_bytes, catalog_info) =
         build_catalog_data(texture_file, &mut cursor, original_bytes, header)?;
@@ -620,8 +643,9 @@ pub(crate) fn dds_record_pixel_format(dds_bytes: &[u8]) -> u32 {
         _ => {
             let flags =
                 u32::from_le_bytes([dds_bytes[80], dds_bytes[81], dds_bytes[82], dds_bytes[83]]);
+            // `ddspf.dwRGBBitCount` sits at offset 88, right after the fourCC.
             let bitdepth =
-                u32::from_le_bytes([dds_bytes[76], dds_bytes[77], dds_bytes[78], dds_bytes[79]]);
+                u32::from_le_bytes([dds_bytes[88], dds_bytes[89], dds_bytes[90], dds_bytes[91]]);
             let r_mask =
                 u32::from_le_bytes([dds_bytes[92], dds_bytes[93], dds_bytes[94], dds_bytes[95]]);
             if (flags & 0x40) != 0 && bitdepth == 32 && r_mask == 0x00FF_0000 {
@@ -683,7 +707,9 @@ pub fn patch_streamtex_sidecar(textures_path: &PathBuf, streamtex_dds: &[DdsInfo
         ));
     };
 
-    let mut header_bytes = original_bytes[0..BASE_OFFSET + header.table_size].to_vec();
+    let header_end =
+        checked_header_end(original_bytes.len(), header.table_size, "Patch Streamtex Sidecar")?;
+    let mut header_bytes = original_bytes[..header_end].to_vec();
     let mut header_mut_cursor = Cursor::new(&mut header_bytes);
 
     let mut record_offset = 0_u32;
@@ -907,8 +933,9 @@ mod tests {
         // Record list mirroring a rebuilt .streamtex: DXT1, ARGB (32-bit) and DXT5.
         let dxt1 = make_test_dds(8, 8, 1, u32::from_le_bytes(*b"DXT1"), 100);
         let mut argb = make_test_dds(16, 32, 3, 0, 50);
-        argb[76..80].copy_from_slice(&32_u32.to_le_bytes());
-        argb[80..84].copy_from_slice(&0x41_u32.to_le_bytes());
+        argb[76..80].copy_from_slice(&32_u32.to_le_bytes()); // ddspf.dwSize
+        argb[80..84].copy_from_slice(&0x41_u32.to_le_bytes()); // DDPF_RGB | DDPF_ALPHAPIXELS
+        argb[88..92].copy_from_slice(&32_u32.to_le_bytes()); // dwRGBBitCount
         argb[92..96].copy_from_slice(&0x00FF_0000_u32.to_le_bytes());
         let dxt5 = make_test_dds(8, 8, 1, u32::from_le_bytes(*b"DXT5"), 200);
 

@@ -118,17 +118,20 @@ pub(super) struct AppState {
     pub(super) logs: Vec<String>,
     pub(super) show_logs: bool,
     pub(super) show_about: bool,
+    pub(super) show_tweaks: bool,
     pub(super) about_section: AboutSection,
     pub(super) style_initialized: bool,
     pub(super) icon_open_file: Option<TextureHandle>,
     pub(super) icon_open_folder: Option<TextureHandle>,
     pub(super) icon_logs: Option<TextureHandle>,
     pub(super) icon_about: Option<TextureHandle>,
+    pub(super) icon_tweaks: Option<TextureHandle>,
     pub(super) show_open_folder_options: bool,
     pub(super) folder_include_multi_texture: bool,
     pub(super) patch_header_on_replace: bool,
     pub(super) streamtex_allow_resize: bool,
     pub(super) streamtex_patch_sidecar: bool,
+    pub(super) resize_on_replace: bool,
     pub(super) show_multi_open_dialog: bool,
     pub(super) show_batch_replace_dialog: bool,
     pub(super) batch_replace_tab_id: Option<usize>,
@@ -222,17 +225,20 @@ impl Default for AppState {
             logs: Vec::new(),
             show_logs: false,
             show_about: false,
+            show_tweaks: false,
             about_section: AboutSection::Guide,
             style_initialized: false,
             icon_open_file: None,
             icon_open_folder: None,
             icon_logs: None,
             icon_about: None,
+            icon_tweaks: None,
             show_open_folder_options: false,
             folder_include_multi_texture: true,
             patch_header_on_replace: false,
             streamtex_allow_resize: false,
             streamtex_patch_sidecar: false,
+            resize_on_replace: false,
             show_multi_open_dialog: false,
             show_batch_replace_dialog: false,
             batch_replace_tab_id: None,
@@ -427,6 +433,7 @@ impl AppState {
         new_dds_bytes: &[u8],
         patch_header: bool,
         streamtex_allow_resize: bool,
+        resize_on_replace: bool,
     ) -> Result<PreparedReplacement, String> {
         let mut patched_bytes = patch_legacy_fourcc(new_dds_bytes);
         let (mut width, mut height, mut mipmap_count, mut pixel_format) =
@@ -478,12 +485,16 @@ impl AppState {
             }
         }
         // For .textures files the catalog sizes and records are patched on save,
-        // so a different compression format can be allowed as an opt-in.
-        let allow_compression_change = patch_header && matches!(file_type, FileType::Textures);
-        // For .streamtex files a record can be replaced with any size/format when
-        // the Streamtex Options allow it; the record length prefix is rewritten
-        // on save and the paired .textures offsets can be patched automatically.
-        let allow_resize = streamtex_allow_resize && matches!(file_type, FileType::Streamtex);
+        // so a different compression format can be allowed as an opt-in. The
+        // resize option implies a format change may accompany the new size.
+        let allow_compression_change =
+            (patch_header || resize_on_replace) && matches!(file_type, FileType::Textures);
+        // A record can be replaced with a different size/format: for .streamtex
+        // through the Streamtex Options, and for both file types through the
+        // resize option. The record fields (pf/mips/width/height) and the size
+        // prefixes are patched on save to match the new DDS header.
+        let allow_resize = (streamtex_allow_resize && matches!(file_type, FileType::Streamtex))
+            || resize_on_replace;
         let mut reasons = Vec::new();
 
         if !allow_resize {
@@ -571,14 +582,33 @@ impl AppState {
                 }
             }
             FileType::Textures => {
-                let note = if allow_compression_change && pixel_format != expected_pf {
-                    Some(format!(
+                let mut notes: Vec<String> = Vec::new();
+                if allow_compression_change && pixel_format != expected_pf {
+                    notes.push(format!(
                         "Different compression detected: {} -> {}. The .textures header will be patched on save.",
                         super::preview::format_pixel_format(original.bytes.as_ref()),
                         super::preview::format_pixel_format(&patched_bytes)
-                    ))
-                } else {
+                    ));
+                }
+                if resize_on_replace
+                    && (width != original.width
+                        || height != original.height
+                        || mipmap_count != original.mipmap_count)
+                {
+                    notes.push(format!(
+                        "Different size or mip count: {}x{} m{} -> {}x{} m{}. The .textures record and catalog sizes will be patched on save.",
+                        original.width,
+                        original.height,
+                        original.mipmap_count,
+                        width,
+                        height,
+                        mipmap_count
+                    ));
+                }
+                let note = if notes.is_empty() {
                     None
+                } else {
+                    Some(notes.join("\n"))
                 };
                 (patched_bytes, mipmap_count, note)
             }
@@ -886,6 +916,7 @@ impl AppState {
                             &bytes,
                             self.patch_header_on_replace,
                             self.streamtex_allow_resize,
+                            self.resize_on_replace,
                         ) {
                             Ok(prepared) => {
                                 entry.status = BatchReplaceStatus::Ready;
@@ -1777,6 +1808,7 @@ impl AppState {
                         &new_dds_bytes,
                         self.patch_header_on_replace,
                         self.streamtex_allow_resize,
+                        self.resize_on_replace,
                     ) {
                         Ok(prepared) => {
                             let PreparedReplacement {
@@ -1907,6 +1939,7 @@ mod tests {
             &argb,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -1929,6 +1962,7 @@ mod tests {
             &argb,
             false,
             true,
+            false,
         )
         .unwrap();
 
@@ -1951,6 +1985,7 @@ mod tests {
             &dxt,
             false,
             true,
+            false,
         )
         .unwrap();
 

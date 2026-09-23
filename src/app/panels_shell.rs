@@ -1039,6 +1039,7 @@ fn draw_left_panel(state: &mut AppState, ctx: &egui::Context) {
                 state.show_logs = !state.show_logs;
                 if state.show_logs {
                     state.show_about = false;
+                    state.show_tweaks = false;
                 }
                 if state.show_logs {
                     if let Some(tab) = state.active_tab_mut() {
@@ -1060,8 +1061,29 @@ fn draw_left_panel(state: &mut AppState, ctx: &egui::Context) {
                 state.show_about = !state.show_about;
                 if state.show_about {
                     state.show_logs = false;
+                    state.show_tweaks = false;
                 }
                 if state.show_about {
+                    if let Some(tab) = state.active_tab_mut() {
+                        tab.show_full_preview = false;
+                    }
+                }
+            }
+
+            ui.add_space(8.0);
+
+            let tweaks_btn = draw_side_btn(
+                ui,
+                "tweaks_btn",
+                state.show_tweaks,
+                state.icon_tweaks.as_ref(),
+                Some("T"),
+            );
+            if tweaks_btn.clicked() {
+                state.show_tweaks = !state.show_tweaks;
+                if state.show_tweaks {
+                    state.show_logs = false;
+                    state.show_about = false;
                     if let Some(tab) = state.active_tab_mut() {
                         tab.show_full_preview = false;
                     }
@@ -1076,6 +1098,8 @@ fn draw_left_panel(state: &mut AppState, ctx: &egui::Context) {
                 state.offer_tooltip(egui::Id::new("logs_tt"), "Logs");
             } else if about_btn.hovered() {
                 state.offer_tooltip(egui::Id::new("about_tt"), "About");
+            } else if tweaks_btn.hovered() {
+                state.offer_tooltip(egui::Id::new("tweaks_tt"), "Tweaks");
             }
         });
 }
@@ -1157,7 +1181,7 @@ fn draw_status_bar(state: &AppState, ctx: &egui::Context) {
 
 #[allow(clippy::too_many_lines)]
 fn draw_inspector(state: &mut AppState, ctx: &egui::Context) {
-    if state.active_tab().is_none() || state.show_logs || state.show_about {
+    if state.active_tab().is_none() || state.show_logs || state.show_about || state.show_tweaks {
         return;
     }
 
@@ -1365,6 +1389,7 @@ fn draw_inspector(state: &mut AppState, ctx: &egui::Context) {
                                             &new_dds_bytes,
                                             state.patch_header_on_replace,
                                             state.streamtex_allow_resize,
+                                            state.resize_on_replace,
                                         ) {
                                             Ok(prepared) => {
                                                 let super::state::PreparedReplacement {
@@ -1421,6 +1446,7 @@ fn draw_inspector(state: &mut AppState, ctx: &egui::Context) {
                             }
                             state.show_logs = false;
                             state.show_about = false;
+                            state.show_tweaks = false;
                         }
 
                         if is_hovering && !is_dragging_file {
@@ -1504,64 +1530,6 @@ fn draw_inspector(state: &mut AppState, ctx: &egui::Context) {
                                 state.replace_selected();
                             }
                         });
-
-                        ui.add_space(4.0);
-                        ui.checkbox(
-                            &mut state.patch_header_on_replace,
-                            "Allow different compression (patch header on save)",
-                        )
-                        .on_hover_text(
-                            "When enabled, replacing this .textures texture with a different compression format is allowed; the catalog sizes and records are patched automatically on save.",
-                        );
-
-                        ui.add_space(6.0);
-
-                        if state
-                            .active_tab()
-                            .and_then(|tab| AppState::file_type_by_index(tab, index))
-                            .is_some_and(|ft| matches!(ft, texembed::FileType::Streamtex))
-                        {
-                            egui::CollapsingHeader::new("Streamtex Options")
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    ui.spacing_mut().item_spacing.y = 6.0;
-                                    ui.checkbox(
-                                        &mut state.streamtex_allow_resize,
-                                        "Allow different compression & size",
-                                    )
-                                    .on_hover_text(
-                                        "Off by default. When enabled, a .streamtex record can be replaced with any DDS size or format (for example DXT1 → A8R8G8B8); the record's length prefix is rewritten when you save. Uncompressed (ARGB) replacements are automatically reduced to mip 0, the only form the game's menu accepts.",
-                                    );
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(
-                                                "Off by default. Lets a record be replaced with any DDS size or format (e.g. DXT1 → ARGB). The new record is stored as-is and its length prefix is rewritten on save. Uncompressed (ARGB) records are automatically reduced to mip 0 (mips=1), since the game's menu only supports that.",
-                                            )
-                                            .color(COLOR_TEXT_SECONDARY)
-                                            .size(12.0),
-                                        )
-                                        .wrap(),
-                                    );
-                                    ui.add_space(4.0);
-                                    ui.checkbox(
-                                        &mut state.streamtex_patch_sidecar,
-                                        "Auto-patch paired .textures on save",
-                                    )
-                                    .on_hover_text(
-                                        "Off by default. After saving this .streamtex, the sibling .textures file is updated: the streamed-catalog data_off offsets are recomputed and the records' format/mips/size are synced from the new DDS headers.",
-                                    );
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(
-                                                "Off by default. When a record changes size, every later record shifts. On save, the paired .textures file is patched (data_off offsets + record format/mips/size) so the game keeps reading the right data.",
-                                            )
-                                            .color(COLOR_TEXT_SECONDARY)
-                                            .size(12.0),
-                                        )
-                                        .wrap(),
-                                    );
-                                });
-                        }
 
                         ui.add_space(6.0);
 

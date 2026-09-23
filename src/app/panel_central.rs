@@ -26,6 +26,11 @@ pub(super) fn draw(state: &mut AppState, ctx: &egui::Context) {
                 return;
             }
 
+            if state.show_tweaks {
+                draw_tweaks(state, ui);
+                return;
+            }
+
             if state.active_tab().is_some_and(|t| t.show_full_preview) {
                 draw_full_preview(state, ctx, ui);
                 return;
@@ -60,7 +65,7 @@ fn draw_about(state: &mut AppState, ui: &mut egui::Ui) {
         }
         if about_tab_button(
             ui,
-            "Split/Second: ARGB Body Paint",
+            "Dithering doc",
             state.about_section == AboutSection::Argb,
         )
         .clicked()
@@ -331,7 +336,7 @@ fn about_tab_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Respo
 #[allow(clippy::too_many_lines)]
 fn draw_about_argb(ui: &mut egui::Ui) {
     ui.label(
-        egui::RichText::new("Split/Second: ARGB Body Paint")
+        egui::RichText::new("Dithering doc")
             .color(COLOR_LABEL_BLUE)
             .size(18.0)
             .strong(),
@@ -339,12 +344,30 @@ fn draw_about_argb(ui: &mut egui::Ui) {
     ui.add_space(4.0);
     ui.add(
         egui::Label::new(
-            egui::RichText::new("The front-end car-select menu draws each vehicle's paint from a pair of files: <car>.streamtex (the DDS records) and <car>.textures (the catalog that locates them). The stock paints are BC1 (DXT1), which dither and band on gradients. Replacing the paint record with an uncompressed A8R8G8B8 (32-bit) DDS gives a clean, dither-free gradient. This tab covers the technical background and the exact workflow that TEXembed automates.")
+            egui::RichText::new("Some color schemes look grainy or banded on gradients, because they are stored with a compressed format (the main one is BC1 / DXT1). Using a different format — uncompressed A8R8G8B8 (ARGB) — removes that dithering, so the gradients show up clear and smooth.")
                 .color(COLOR_TEXT)
                 .size(14.0),
         )
         .wrap(),
     );
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new("• To fix it, turn on the .textures option in the Tweaks panel (the last button on the left). It lets you put your own DDS design into that .textures texture even if its compression is different.")
+                .color(COLOR_TEXT)
+                .size(14.0),
+        );
+    });
+    ui.add_space(2.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new("• Keep in mind this only applies to .textures files. For .streamtex there are separate checkboxes, explained in the same Tweaks panel.")
+                .color(COLOR_TEXT)
+                .size(14.0),
+        );
+    });
 
     guide_card(ui, "File structure (the knowledge)", |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -404,22 +427,43 @@ fn draw_about_argb(ui: &mut egui::Ui) {
         });
     });
 
-    guide_card(ui, "The required exe patch (outside this tool)", |ui| {
+    guide_card(ui, "Use SSDC v2", |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("The game streams the whole .streamtex into a fixed 6 MB memory pool. An A8R8G8B8 paint record is ~8 MB, which overflows the pool and crashes the game (access violation). Apply patch_menu_argb.py (included in the repository) to SplitSecond.exe: it redirects the streaming destination buffer from the 6 MB pool to the regular heap. The patch is harmless with the stock files.")
+                egui::RichText::new("Make sure you use the SSDC v2 build. In this build, an ARGB-compressed paint is displayed without any problem — no extra patch is needed.")
                     .color(COLOR_TEXT)
                     .size(14.0),
             );
         });
+
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new("The same ~6 MB cap applies to frontend and UI .streamtex files: the game sets a fixed limit for them, and a .streamtex larger than that cannot be handled and will crash the game.")
+                    .color(COLOR_TEXT)
+                    .size(14.0),
+            );
+        });
+
+        ui.add_space(6.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Psst — the two .streamtex options are completely optional and are mainly placed for testing. If you are not sure how to use them correctly, there is no need to enable them.")
+                    .color(COLOR_TEXT_SECONDARY)
+                    .italics()
+                    .size(13.0),
+            )
+            .wrap(),
+        );
     });
 
     guide_card(ui, "How TEXembed automates this", |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("• Allow different compression & size: lets a .streamtex record be replaced with any format or size and rewrites the record length prefix on save. Uncompressed (A8R8G8B8) replacements are automatically reduced to mip 0 (mips=1).")
+                egui::RichText::new("• Allow different compression & size: lets a .streamtex record be replaced with any format or size and rewrites the record length prefix on save. Uncompressed (A8R8G8B8) replacements are reduced to mip 0 (mips=1).")
                     .color(COLOR_TEXT)
                     .size(14.0),
             );
@@ -433,6 +477,17 @@ fn draw_about_argb(ui: &mut egui::Ui) {
                     .size(14.0),
             );
         });
+
+        ui.add_space(6.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("Psst — both options now live in the Tweaks panel (the last button on the left). The auto-patch only works when the same-named .textures sits in its proper folder next to the .streamtex; do not use the size-changing option on a standalone .streamtex that has no paired .textures.")
+                    .color(COLOR_TEXT_SECONDARY)
+                    .italics()
+                    .size(13.0),
+            )
+            .wrap(),
+        );
     });
 
     guide_card(
@@ -441,7 +496,7 @@ fn draw_about_argb(ui: &mut egui::Ui) {
         |ui| {
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new("By default, replacing a texture requires an identical compression format (for example BC1 with BC1). The \"Allow different compression (patch .textures header)\" checkbox — found in the Inspector under the Replace button and in the Batch Replace dialog — relaxes that rule for .textures files: it lets you swap in a different format (for example BC1 → BC3), and on save the catalog sizes and the static records are patched automatically so the game loads the new format. It is off by default.")
+                    egui::RichText::new("By default, replacing a texture requires an identical compression format (for example BC1 with BC1). The \"Allow different compression for .textures\" option — the first card in the Tweaks panel (the last button on the left) — relaxes that rule for .textures files: it lets you swap in a different compression, such as ARGB (uncompressed) or any other format the game supports (for example BC1 to BC3), and on save the catalog sizes and the static records are patched automatically so the game loads the new format. It is off by default.")
                         .color(COLOR_TEXT)
                         .size(14.0),
                 )
@@ -464,7 +519,7 @@ fn draw_about_argb(ui: &mut egui::Ui) {
             ui.add_space(6.0);
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new("Psst — this option only applies to .textures files; the Streamtex Options (above) handle .streamtex records instead.")
+                    egui::RichText::new("Psst — this option only applies to .textures files; the .streamtex options in the Tweaks panel (the last button on the left) handle .streamtex records instead.")
                         .color(COLOR_TEXT_SECONDARY)
                         .italics()
                         .size(13.0),
@@ -478,49 +533,42 @@ fn draw_about_argb(ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("1. Apply the exe patch once (see above).").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new("1. Make sure you use the SSDC v2 build (see above).").color(COLOR_TEXT).size(14.0),
             );
         });
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("2. Open <car>.streamtex, e.g. Deferred/Vehicles/Frontend/Bodies/Musclecar_09/Musclecar_09.streamtex.").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new("2. Open the bodypaint.textures of the car you want.").color(COLOR_TEXT).size(14.0),
             );
         });
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("3. Select the body-paint record (record 0) in the grid.").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new("3. In the Tweaks panel (the last button on the left), turn on the .textures option.").color(COLOR_TEXT).size(14.0),
             );
         });
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("4. In the Inspector, tick both checkboxes under \"Streamtex Options\".").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new("4. Select the body-paint texture and replace it with your A8R8G8B8 (ARGB) DDS using Replace or drag & drop.").color(COLOR_TEXT).size(14.0),
             );
         });
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("5. Replace record 0 with your A8R8G8B8 DDS (any mip count — it is auto-reduced to mip 0) using Replace or drag & drop.").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new("5. Save with Ctrl+S. The log tells you when the header is patched.").color(COLOR_TEXT).size(14.0),
             );
         });
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("6. Save with Ctrl+S. The log reports the mip-0 reduction and the paired-.textures patch.").color(COLOR_TEXT).size(14.0),
-            );
-        });
-        ui.add_space(2.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new("7. Launch the game and check the car-select menu.").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new("6. Launch the game and check the car.").color(COLOR_TEXT).size(14.0),
             );
         });
     });
@@ -528,7 +576,7 @@ fn draw_about_argb(ui: &mut egui::Ui) {
     ui.add_space(6.0);
     ui.add(
         egui::Label::new(
-            egui::RichText::new("Psst — keep the same width/height as the original record (1024×2048 for Musclecar_09); only the format and mip count change in the tested workflow.")
+            egui::RichText::new("Psst — keep the same width, height and mip count as the original texture; only the compression format may differ in this workflow.")
                 .color(COLOR_TEXT_SECONDARY)
                 .italics()
                 .size(13.0),
@@ -570,6 +618,142 @@ fn draw_logs(state: &mut AppState, ui: &mut egui::Ui) {
                     }
                 });
         });
+}
+
+fn draw_tweaks(state: &mut AppState, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Tweaks")
+                .color(COLOR_TEXT)
+                .strong()
+                .size(18.0),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Back to Previews").clicked() {
+                state.show_tweaks = false;
+            }
+        });
+    });
+    ui.add_space(4.0);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(
+                "These are advanced switches that change how TEXembed checks and rewrites textures when you replace and save. They are all OFF by default — leaving them off is the safest choice. Turn one on only when you actually need it and you understand what it does.",
+            )
+            .color(COLOR_TEXT_SECONDARY)
+            .size(13.0),
+        )
+        .wrap(),
+    );
+    ui.add_space(12.0);
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::Frame::none()
+            .fill(COLOR_CARD)
+            .rounding(4.0)
+            .inner_margin(16.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+
+                tweak_card(
+                    ui,
+                    &mut state.patch_header_on_replace,
+                    "Allow different compression for .textures (patch header on save)",
+                    "Normally, when you replace a texture inside a .textures file, the new DDS must use exactly the same compression as the original (for example BC1 stays BC1). Turn this on to allow a different compression for the replacement — such as ARGB (uncompressed) or any other format the game supports, for example BC1 to BC3. TEXembed then rewrites the file's internal header and records on save so the game still reads it correctly.",
+                    "Leave this OFF unless a replacement keeps getting skipped for a compression mismatch. The width, height and mip count must still match the original exactly — this only relaxes the compression format.",
+                );
+
+                tweak_card(
+                    ui,
+                    &mut state.resize_on_replace,
+                    "Allow a different size and mip count on replace (patch the record on save)",
+                    "Normally a replacement must have exactly the same width, height and mip count as the texture you are replacing. Turn this on to allow a completely different size and mip count instead (for example a 2048x2048 with a full mip chain in place of a 1024x1024 single mip). This applies to the items inside the .textures you opened, and also to .streamtex records. On save TEXembed rewrites the file's own header — for a .textures that means the record that sits before the DDS (format, mips, width, height) and the catalog sizes; for a .streamtex it means the record's length prefix. The DDS header is stored as-is, so whatever format and dimensions you bring are used.",
+                    "Leave this OFF for normal edits and keep the original size and mips. Use it only when you really need a different resolution, and keep the paired-file options in mind for .streamtex: a standalone .streamtex with no same-named .textures next to it should not be resized, because the record locations cannot be fixed. If you are not sure you need this, keep it off.",
+                );
+
+                tweak_card(
+                    ui,
+                    &mut state.streamtex_allow_resize,
+                    "Allow different compression and size for .streamtex records",
+                    "The same idea as the .textures option above, but for records inside a .streamtex: it lets you swap in a different compression (for example DXT1 to A8R8G8B8) and also a different size. The new image is stored as-is and the record's length value is rewritten when you save. When the paired .textures file sits next to it with the same name, that file is updated automatically too, so the two stay in sync. Uncompressed (ARGB) replacements are reduced to mip 0 (a single mip level), because the game's menu only accepts that form.",
+                    "Keep this OFF unless you deliberately need it — it is fully optional and mainly meant for testing. Do not use it on a standalone .streamtex whose same-named .textures is not in its proper folder next to it: without that file the record locations cannot be fixed and the game will read broken data. If you are not sure how to use it correctly, there is no need to enable it.",
+                );
+
+                tweak_card(
+                    ui,
+                    &mut state.streamtex_patch_sidecar,
+                    "Auto-patch the paired .textures when saving a .streamtex",
+                    "A .streamtex is paired with a sibling .textures that stores where each record lives. When you change a record's size, every later record shifts, so those stored locations become stale and the game reads the wrong data. Turn this on and, after saving the .streamtex, TEXembed updates the paired .textures too — it recomputes the record offsets and syncs each record's format, mips, width and height from the new DDS headers.",
+                    "Keep this ON together with the option above whenever you change a record's size, otherwise the game may show wrong or broken textures. If you only replace records with the identical size, this is not needed.",
+                );
+
+                ui.add_space(4.0);
+                egui::Frame::none()
+                    .fill(COLOR_INSPECTOR_BOX)
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new("Note — frontend / UI .streamtex")
+                                .color(COLOR_LABEL_BLUE)
+                                .strong()
+                                .size(14.0),
+                        );
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(
+                                    "The game sets a fixed cap for these: a frontend or UI .streamtex larger than about 6 MB cannot be handled and will crash the game. Both .streamtex options above are completely optional and are mainly here for testing — if you are not sure how to use them correctly, simply leave them off.",
+                                )
+                                .color(COLOR_TEXT_SECONDARY)
+                                .size(13.0),
+                            )
+                            .wrap(),
+                        );
+                    });
+            });
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tweak_card(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    title: &str,
+    plain: &str,
+    safe: &str,
+) {
+    egui::Frame::none()
+        .fill(COLOR_INSPECTOR_BOX)
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.checkbox(value, egui::RichText::new(title).color(COLOR_TEXT).strong().size(15.0));
+            });
+            ui.add_space(6.0);
+            ui.add(
+                egui::Label::new(egui::RichText::new(plain).color(COLOR_TEXT).size(14.0)).wrap(),
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("Safest use:")
+                        .color(COLOR_LABEL_BLUE)
+                        .strong()
+                        .size(13.0),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(safe).color(COLOR_TEXT_SECONDARY).size(13.0),
+                    )
+                    .wrap(),
+                );
+            });
+        });
+    ui.add_space(12.0);
 }
 
 fn paint_unsaved_badge(ui: &egui::Ui, rect: Rect) {

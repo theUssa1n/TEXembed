@@ -177,6 +177,8 @@ impl eframe::App for AppState {
             );
             self.icon_logs = load_png_icon(ctx, "logs_icon", include_bytes!("../../logs.png"));
             self.icon_about = load_png_icon(ctx, "about_icon", include_bytes!("../../about.png"));
+            self.icon_tweaks =
+                load_png_icon(ctx, "tweaks_icon", include_bytes!("../../tweaks.png"));
         }
 
         panels_shell::draw(self, ctx);
