@@ -418,7 +418,7 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
     let missing_count = state
         .batch_replace_entries
         .iter()
-        .filter(|entry| entry.source_name.is_none())
+        .filter(|entry| entry.is_missing())
         .count();
     let issue_count = state
         .batch_replace_entries
@@ -513,6 +513,7 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
             ui.add_space(12.0);
             ui.label(egui::RichText::new("Matching rule").color(COLOR_TEXT));
             ui.add_space(6.0);
+            let previous_rule = state.batch_replace_rule;
             ui.radio_value(
                 &mut state.batch_replace_rule,
                 BatchReplaceRule::ExactName,
@@ -523,6 +524,13 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                 BatchReplaceRule::Index,
                 "Index (0.dds or texture_0.dds)",
             );
+            // Changing the matching rule invalidates the previous scan: the
+            // entries would otherwise keep the matches computed with the old
+            // rule.
+            if state.batch_replace_rule != previous_rule {
+                state.batch_replace_entries.clear();
+                state.batch_replace_unused_sources.clear();
+            }
 
             ui.add_space(10.0);
             ui.checkbox(
@@ -607,7 +615,7 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                         .map_or_else(String::new, |size| format!(" ({size})"));
                     let status_color = if entry.is_ready() {
                         COLOR_LABEL_BLUE
-                    } else if entry.source_name.is_none() {
+                    } else if entry.is_missing() {
                         COLOR_TEXT_SECONDARY
                     } else {
                         COLOR_ACCENT_ORANGE
@@ -1499,6 +1507,14 @@ fn draw_inspector(state: &mut AppState, ctx: &egui::Context) {
                         ui.spacing_mut().item_spacing.y = 8.0;
                         property_box(ui, "Width", &dds.width.to_string());
                         property_box(ui, "Height", &dds.height.to_string());
+                        let volume_depth = super::volume::volume_depth(dds.bytes.as_ref());
+                        if volume_depth > 1 {
+                            property_box(
+                                ui,
+                                "Depth (volumetric)",
+                                &format!("{volume_depth} (3D texture)"),
+                            );
+                        }
                         property_box(ui, "Compression", &format_pixel_format(dds.bytes.as_ref()));
                         property_box(ui, "Mipmaps", &dds.mipmap_count.to_string());
 

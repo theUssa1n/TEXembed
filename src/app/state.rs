@@ -394,6 +394,10 @@ impl BatchReplaceEntry {
         matches!(self.status, BatchReplaceStatus::Ready)
     }
 
+    pub(super) const fn is_missing(&self) -> bool {
+        matches!(self.status, BatchReplaceStatus::Missing)
+    }
+
     pub(super) fn status_label(&self) -> String {
         match &self.status {
             BatchReplaceStatus::Ready => "Ready".to_string(),
@@ -961,25 +965,35 @@ impl AppState {
             return;
         };
 
-        let ready_entries: Vec<(usize, PreparedReplacement)> = self
+        // The replace options (allow different compression, streamtex resize,
+        // resize on replace) can be toggled after scanning. Re-read and
+        // re-validate each source here instead of trusting the `prepared`
+        // results cached by the scan, otherwise Apply would silently ignore the
+        // current settings.
+        let sources: Vec<(usize, std::path::PathBuf)> = self
             .batch_replace_entries
             .iter()
             .filter_map(|entry| {
                 entry
-                    .prepared
+                    .source_path
                     .clone()
-                    .map(|prepared| (entry.target_index, prepared))
+                    .map(|path| (entry.target_index, path))
             })
             .collect();
 
-        if ready_entries.is_empty() {
+        if sources.is_empty() {
             self.error_message =
                 Some("There are no valid batch replacements to apply.".to_string());
             return;
         }
 
+        let patch_header = self.patch_header_on_replace;
+        let streamtex_allow_resize = self.streamtex_allow_resize;
+        let resize_on_replace = self.resize_on_replace;
+
         let mut applied_names: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
         let mut refreshed_indices: Vec<usize> = Vec::new();
 
         {
@@ -988,9 +1002,33 @@ impl AppState {
                 return;
             };
 
-            for (index, prepared) in ready_entries {
+            for (index, path) in sources {
                 let Some(original) = Self::dds_by_index(tab, index).cloned() else {
                     continue;
+                };
+                let Some(file_type) = Self::file_type_by_index_cloned(tab, index) else {
+                    continue;
+                };
+                let bytes = match fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        failures.push(format!("{}: {err}", original.name));
+                        continue;
+                    }
+                };
+                let prepared = match Self::prepare_replacement_dds(
+                    &file_type,
+                    &original,
+                    &bytes,
+                    patch_header,
+                    streamtex_allow_resize,
+                    resize_on_replace,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(err) => {
+                        failures.push(format!("{}: {}", original.name, err.replace('\n', " | ")));
+                        continue;
+                    }
                 };
                 if let Some((name, note)) =
                     Self::apply_prepared_replacement_to_index(tab, index, &original, prepared)
@@ -1017,8 +1055,23 @@ impl AppState {
         }
 
         if applied_names.is_empty() {
-            self.error_message = Some("No batch replacements were applied.".to_string());
+            self.error_message = Some(if failures.is_empty() {
+                "No batch replacements were applied.".to_string()
+            } else {
+                format!(
+                    "No batch replacements were applied. {}",
+                    failures.join(" | ")
+                )
+            });
             return;
+        }
+
+        if !failures.is_empty() {
+            self.error_message = Some(format!(
+                "{} textures failed and were skipped: {}",
+                failures.len(),
+                failures.join(" | ")
+            ));
         }
 
         self.log(&format!(
@@ -1686,7 +1739,7 @@ impl AppState {
             .add_filter("DDS File", &["dds"])
             .save_file()
         {
-            match fs::write(&save_path, patch_legacy_fourcc(dds.bytes.as_ref())) {
+            match fs::write(&save_path, Self::export_bytes(&dds)) {
                 Ok(()) => self.log(&format!("Exported texture to {}", save_path.display())),
                 Err(err) => self.error_message = Some(err.to_string()),
             }
