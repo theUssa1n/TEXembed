@@ -21,8 +21,11 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
 WizardStyle=modern dynamic
-; Supported Windows versions: 7, 8, 8.1, 10, 11 (both 32 and 64 bit)
-MinVersion=6.1sp1
+; Supported Windows versions: 10 and 11 (64-bit only)
+MinVersion=10.0
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=icon.ico
 ChangesAssociations=yes
 
@@ -32,7 +35,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "restartexplorer"; Description: "Restart Windows Explorer (Required to apply file icons)"; GroupDescription: "System Actions:"
 
 [Files]
 Source: "target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -43,21 +45,19 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "
 Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Registry]
-; Register .textures file extension
-Root: HKCU; Subkey: "Software\Classes\.textures"; ValueType: string; ValueData: "splitsecond.texembed.textures"; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\splitsecond.texembed.textures"; ValueType: string; ValueData: "TEXTURES File"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\splitsecond.texembed.textures\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"
-Root: HKCU; Subkey: "Software\Classes\splitsecond.texembed.textures\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+; Register .textures file extension (machine-wide, since Setup runs elevated)
+Root: HKLM; Subkey: "Software\Classes\.textures"; ValueType: string; ValueData: "splitsecond.texembed.textures"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures"; ValueType: string; ValueData: "TEXTURES File"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
-; Register .streamtex file extension
-Root: HKCU; Subkey: "Software\Classes\.streamtex"; ValueType: string; ValueData: "splitsecond.texembed.streamtex"; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\splitsecond.texembed.streamtex"; ValueType: string; ValueData: "STREAMTEX File"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\splitsecond.texembed.streamtex\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"
-Root: HKCU; Subkey: "Software\Classes\splitsecond.texembed.streamtex\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+; Register .streamtex file extension (machine-wide, since Setup runs elevated)
+Root: HKLM; Subkey: "Software\Classes\.streamtex"; ValueType: string; ValueData: "splitsecond.texembed.streamtex"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex"; ValueType: string; ValueData: "STREAMTEX File"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
-Filename: "{cmd}"; Parameters: "/c taskkill /f /im explorer.exe"; Flags: runhidden waituntilterminated; Tasks: restartexplorer
-Filename: "{win}\explorer.exe"; Flags: runasoriginaluser nowait; Tasks: restartexplorer
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName,'&','&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -68,20 +68,13 @@ const
 procedure SHChangeNotify(wEventId: Longint; uFlags: Longint; dwItem1, dwItem2: Longint);
   external 'SHChangeNotify@shell32.dll stdcall';
 
-procedure CurPageChanged(CurPageID: Integer);
-var
-  I: Integer;
+procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurPageID = wpSelectTasks then
+  if CurStep = ssPostInstall then
   begin
-    for I := 0 to WizardForm.TasksList.Items.Count - 1 do
-    begin
-      if Pos('Restart Windows Explorer', WizardForm.TasksList.Items[I]) > 0 then
-      begin
-        WizardForm.TasksList.Checked[I] := True;
-        WizardForm.TasksList.ItemEnabled[I] := False;
-      end;
-    end;
+    { Notify Explorer to refresh file associations/icons without killing
+      or restarting explorer.exe. }
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, 0, 0);
   end;
 end;
 
