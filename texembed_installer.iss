@@ -18,6 +18,7 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputBaseFilename=TEXembed_win-x64
 Compression=lzma2/ultra64
+LZMANumFastBytes=273
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
 WizardStyle=modern dynamic
@@ -45,16 +46,24 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "
 Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Registry]
+; Remove leftover per-user registrations from older (32-bit) versions.
+; HKCU\Software\Classes overrides HKLM\Software\Classes, so stale entries
+; there would keep pointing at the old "Program Files (x86)" path.
+Root: HKCU; Subkey: "Software\Classes\.textures"; ValueType: none; Flags: deletekey dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.streamtex"; ValueType: none; Flags: deletekey dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\splitsecond.texembed.textures"; ValueType: none; Flags: deletekey dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\splitsecond.texembed.streamtex"; ValueType: none; Flags: deletekey dontcreatekey
+
 ; Register .textures file extension (machine-wide, since Setup runs elevated)
 Root: HKLM; Subkey: "Software\Classes\.textures"; ValueType: string; ValueData: "splitsecond.texembed.textures"; Flags: uninsdeletevalue
 Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures"; ValueType: string; ValueData: "TEXTURES File"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures\DefaultIcon"; ValueType: string; ValueData: "{app}\icon.ico"
 Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 ; Register .streamtex file extension (machine-wide, since Setup runs elevated)
 Root: HKLM; Subkey: "Software\Classes\.streamtex"; ValueType: string; ValueData: "splitsecond.texembed.streamtex"; Flags: uninsdeletevalue
 Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex"; ValueType: string; ValueData: "STREAMTEX File"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex\DefaultIcon"; ValueType: string; ValueData: "{app}\icon.ico"
 Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
