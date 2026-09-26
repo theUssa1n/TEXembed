@@ -90,14 +90,20 @@ struct CatalogEntry {
 //                      stored inline but in the sibling `<name>.streamtex`.
 //                      Non-zero => the size in bytes of the inline data region
 //                      that follows the table region for this catalog.
-//   entry_count        number of 12-byte entries that follow this header.
-//   entries_offset     offset of the entry array, relative to BASE_OFFSET.
+//   entry_count        number of 12-byte entries in the array.
+//   entries_offset     offset of the entry array, relative to the 0x10 base.
+//                      Modelled as a pointer array so the entries are expanded.
 // ---------------------------------------------------------------------------
 struct Catalog {
     u32 texture_data_size [[comment("0 = streamed (.streamtex sidecar)")]];
     u32 unknown;
     u32 entry_count;
-    u32 entries_offset    [[comment("relative to 0x10 base -> CatalogEntry[]")]];
+    // `entries_offset` (relative to the 0x10 base) is stored right here. It is
+    // declared as a pointer array so the `entry_count` entries are expanded in
+    // place: only the 4-byte offset itself is consumed, keeping the catalog
+    // stride at 16 bytes. A plain `u32` would leave the entries unparsed.
+    CatalogEntry *entries[entry_count] : u32
+        [[pointer_base("relative_to_base")]];
 };
 
 // ---------------------------------------------------------------------------
