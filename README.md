@@ -269,7 +269,7 @@ Bug reports, format findings and pull requests are welcome.
 ## Credits
 
 - **Ussa1n**: author and maintainer.
-- **Lahvuun**: released the base source for texture analysis and extraction.
+- **[Lahvuun](https://github.com/Lahvuun)**: released the base source for texture analysis and extraction (MIT licensed).
 - **Selter**: tool testing and many suggestions for improvement and optimization.
 
 ## License
