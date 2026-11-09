@@ -16,13 +16,17 @@ Open `.textures` and `.streamtex` containers, preview every DDS inside them, exp
 
 </div>
 
+> [!NOTE]
 > **Unofficial fan tool.** TEXembed is not affiliated with, endorsed by, or connected to the developers or publisher of Split/Second. It contains no game assets. You need your own copy of the game.
 
-<img width="1920" height="2098" alt="Screenshot (338)" src="https://github.com/user-attachments/assets/111f3841-e9ba-42b0-90ff-a282fd0501b8" />
+<p align="center">
+  <img width="900" alt="Screenshot" src="https://github.com/user-attachments/assets/111f3841-e9ba-42b0-90ff-a282fd0501b8" />
+</p>
 
 ---
 
-## Table of contents
+<details>
+<summary><b>Table of contents</b></summary>
 
 - [Features](#features)
 - [Supported files](#supported-files)
@@ -40,6 +44,8 @@ Open `.textures` and `.streamtex` containers, preview every DDS inside them, exp
 - [Credits](#credits)
 - [License](#license)
 
+</details>
+
 ---
 
 ## Features
@@ -52,7 +58,7 @@ Open `.textures` and `.streamtex` containers, preview every DDS inside them, exp
 - **Replace** a texture with your own DDS through a file dialog, or just **drag a DDS onto the preview thumbnail** in the Inspector. Changes stay in memory with **Undo** until you save.
 - **Batch Replace**: match a whole folder of DDS files against the open container (by name or by index) and replace everything in one step.
 - **Open folder view** and **Shared view**: browse many files at once in a single combined gallery, or open each file in its own tab.
-- **Tabs and shortcuts**: `Ctrl + Tab` switches files, `Ctrl + W` closes the current one, `Ctrl + S` saves.
+- **Tabs and shortcuts**: <kbd>Ctrl</kbd> + <kbd>Tab</kbd> switches files, <kbd>Ctrl</kbd> + <kbd>W</kbd> closes the current one, <kbd>Ctrl</kbd> + <kbd>S</kbd> saves.
 - **Cubemaps and 3D (volume) textures** are previewed as a cross layout and a flat slice atlas respectively. See [Special texture types](#special-texture-types).
 - **Legacy DDS compatibility**: obsolete `DXT2`/`DXT4` textures are normalised to `DXT3`/`DXT5`, and uncompressed `B8G8R8A8` data is decoded correctly.
 - **Optional Tweaks** that relax the strict replacement rules (different compression, size, mip count) and automatically patch the file headers, records and paired files on save.
@@ -100,7 +106,7 @@ See [Building from source](#building-from-source).
 3. **Inspect.** Click the preview in the Inspector for Full Preview. Scroll to zoom, drag to pan, **Reset** to restore. Toggle the transparency background to check alpha.
 4. **Export.** Use the Inspector to export the selected texture as DDS (and optionally PNG), or **Export all as DDS** for the whole tab.
 5. **Replace.** Select a texture, click **Replace** (or drop a DDS on the preview) and choose your edited file.
-6. **Save.** Press `Ctrl + S` or click **Save changes** to write the modified container to disk. Use **Undo** if you change your mind before saving.
+6. **Save.** Press <kbd>Ctrl</kbd> + <kbd>S</kbd> or click **Save changes** to write the modified container to disk. Use **Undo** if you change your mind before saving.
 
 When you drop several files at once, TEXembed asks whether to open them in **Shared view** (one combined gallery, recommended) or **Separate tabs**. Both modes offer an **Include multi-texture files** option.
 
@@ -108,9 +114,9 @@ When you drop several files at once, TEXembed asks whether to open them in **Sha
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl + Tab` | Switch between open files |
-| `Ctrl + W` | Close the current file |
-| `Ctrl + S` | Save changes to disk |
+| <kbd>Ctrl</kbd> + <kbd>Tab</kbd> | Switch between open files |
+| <kbd>Ctrl</kbd> + <kbd>W</kbd> | Close the current file |
+| <kbd>Ctrl</kbd> + <kbd>S</kbd> | Save changes to disk |
 
 ## Replacing textures
 
@@ -126,7 +132,8 @@ Mismatched files are rejected with a message in the log instead of silently corr
 
 Replacing keeps the change **in memory**. Nothing touches the original file until you save, and an **Undo** button appears as soon as there is something to undo.
 
-> **Tip:** Dithering and banding on gradients are usually caused by BC1/DXT1 compression. Replacing such a texture with an uncompressed `A8R8G8B8` (ARGB) DDS removes it. This needs the *Allow different compression* option, see below.
+> [!TIP]
+> Dithering and banding on gradients are usually caused by BC1/DXT1 compression. Replacing such a texture with an uncompressed `A8R8G8B8` (ARGB) DDS removes it. This needs the *Allow different compression* option, see below.
 
 ## Batch Replace
 
@@ -170,7 +177,9 @@ Important points:
 
 ## Known limits and safety notes
 
-- **Keep backups.** Always work on a copy of the game's files, or keep the originals somewhere safe. Saving overwrites the container.
+> [!WARNING]
+> **Keep backups.** Always work on a copy of the game's files, or keep the originals somewhere safe. Saving overwrites the container.
+
 - **Offsets matter.** The engine locates records by absolute offsets and does not walk files sequentially. If one `.streamtex` record changes size, every later record shifts, so the paired `.textures` must be updated (the auto-patch option does this). Stale offsets show up as wrong or black textures.
 - **Menu / frontend streamed loader.** It only accepts uncompressed records with a single mip level. A full mip chain can stop a vehicle from rendering at all, with no crash.
 - **About 6 MB cap for frontend and UI `.streamtex` files.** The game sets a fixed limit. A larger file cannot be handled and will crash the game.
