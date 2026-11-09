@@ -1,25 +1,33 @@
 use egui::{Color32, CursorIcon, FontFamily, FontId, Pos2, Rect, Sense, TextureHandle, Vec2};
 
-use super::constants::{COLOR_INSPECTOR_BOX, COLOR_LABEL_BLUE};
+use super::constants::{
+    COLOR_BORDER_MEDIUM, COLOR_BORDER_SUBTLE, COLOR_CARD_SURFACE, COLOR_HOVER_OVERLAY, COLOR_TEXT,
+    COLOR_TEXT_SECONDARY,
+};
 
 pub(super) fn property_box(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.label(
-            egui::RichText::new(label)
-                .color(COLOR_LABEL_BLUE)
-                .size(13.0)
+            egui::RichText::new(label.to_uppercase())
+                .color(COLOR_TEXT_SECONDARY)
+                .size(9.5)
                 .strong(),
         );
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
-        ui.painter()
-            .rect_filled(rect, egui::Rounding::same(2.0), COLOR_INSPECTOR_BOX);
+        let painter = ui.painter();
+        painter.rect_filled(rect, egui::Rounding::same(6.0), COLOR_CARD_SURFACE);
+        painter.rect_stroke(
+            rect,
+            egui::Rounding::same(6.0),
+            egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE),
+        );
         let inner = rect.shrink2(Vec2::new(8.0, 4.0));
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(
-                    egui::Label::new(egui::RichText::new(value).color(Color32::WHITE).size(13.0))
+                    egui::Label::new(egui::RichText::new(value).color(COLOR_TEXT).size(13.0))
                         .selectable(true),
                 );
             });
@@ -29,18 +37,25 @@ pub(super) fn property_box(ui: &mut egui::Ui, label: &str, value: &str) {
 
 pub(super) fn guide_card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::none()
-        .fill(COLOR_INSPECTOR_BOX)
-        .rounding(egui::Rounding::same(6.0))
+        .fill(COLOR_CARD_SURFACE)
+        .stroke(egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE))
+        .rounding(egui::Rounding::same(10.0))
         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(
-                egui::RichText::new(title)
-                    .color(COLOR_LABEL_BLUE)
+                egui::RichText::new(title.to_uppercase())
+                    .color(COLOR_TEXT_SECONDARY)
                     .strong()
-                    .size(15.0),
+                    .size(9.5),
             );
-            ui.add_space(6.0);
+            let (div, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), 1.0),
+                Sense::hover(),
+            );
+            ui.painter()
+                .rect_filled(div, 0.0, COLOR_BORDER_SUBTLE);
+            ui.add_space(10.0);
             body(ui);
         });
     ui.add_space(10.0);
@@ -160,6 +175,44 @@ pub(super) fn gradient_button(
         out = out.on_hover_cursor(CursorIcon::PointingHand);
     }
     out
+}
+
+/// Submarine-style secondary toolbar button: subtle translucent fill, thin
+/// border, uppercase label. Used for header actions (Back / Clear / Reset / ±).
+pub(super) fn ghost_button(
+    ui: &mut egui::Ui,
+    text: &str,
+    size: Vec2,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let painter = ui.painter();
+    let rounding = egui::Rounding::same(6.0);
+
+    let fill = if response.hovered() && response.is_pointer_button_down_on() {
+        COLOR_BORDER_MEDIUM
+    } else if response.hovered() {
+        COLOR_HOVER_OVERLAY
+    } else {
+        Color32::from_white_alpha(10)
+    };
+    painter.rect_filled(rect, rounding, fill);
+    painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0_f32, COLOR_BORDER_MEDIUM));
+
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        FontId::new(11.0, FontFamily::Proportional),
+        if response.hovered() {
+            COLOR_TEXT
+        } else {
+            COLOR_TEXT_SECONDARY
+        },
+    );
+
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(text)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

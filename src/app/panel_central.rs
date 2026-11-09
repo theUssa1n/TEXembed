@@ -2,11 +2,14 @@ use eframe::egui;
 use egui::{Color32, CursorIcon, FontFamily, FontId, Pos2, Rect, Sense, Vec2};
 
 use super::constants::{
-    COLOR_ACCENT_ORANGE, COLOR_ACCENT_RED, COLOR_BG, COLOR_CARD, COLOR_CARD_SELECTED,
-    COLOR_INSPECTOR_BOX, COLOR_LABEL_BLUE, COLOR_TEXT, COLOR_TEXT_SECONDARY, THUMBNAIL_SIZE,
+    COLOR_ACCENT_ORANGE, COLOR_BG, COLOR_BORDER_MEDIUM, COLOR_BORDER_SUBTLE, COLOR_BTN_BLUE,
+    COLOR_CARD_SURFACE, COLOR_LABEL_BLUE, COLOR_PRIMARY_BORDER, COLOR_PRIMARY_TRANSLUCENT,
+    COLOR_TEXT, COLOR_TEXT_SECONDARY, THUMBNAIL_SIZE,
 };
 use super::state::{AboutSection, AppState, PreviewState};
-use super::widgets::{brighten_color, guide_card, paint_checkerboard, paint_texture_fitted};
+use super::widgets::{
+    brighten_color, ghost_button, guide_card, paint_checkerboard, paint_texture_fitted,
+};
 
 pub(super) fn draw(state: &mut AppState, ctx: &egui::Context) {
     egui::CentralPanel::default()
@@ -50,7 +53,7 @@ fn draw_about(state: &mut AppState, ui: &mut egui::Ui) {
                 .size(18.0),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Back to Previews").clicked() {
+            if ghost_button(ui, "BACK TO PREVIEWS", Vec2::new(132.0, 28.0)).clicked() {
                 state.show_about = false;
             }
         });
@@ -77,8 +80,9 @@ fn draw_about(state: &mut AppState, ui: &mut egui::Ui) {
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         egui::Frame::none()
-            .fill(COLOR_CARD)
-            .rounding(4.0)
+            .fill(COLOR_CARD_SURFACE)
+            .stroke(egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE))
+            .rounding(10.0)
             .inner_margin(16.0)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -298,27 +302,31 @@ fn draw_about(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 fn about_tab_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
-    let fill = if active {
-        COLOR_ACCENT_RED
+    let (fill, stroke, text_color) = if active {
+        (
+            COLOR_PRIMARY_TRANSLUCENT,
+            egui::Stroke::new(1.0_f32, COLOR_PRIMARY_BORDER),
+            COLOR_TEXT,
+        )
     } else {
-        COLOR_INSPECTOR_BOX
-    };
-    let text_color = if active {
-        COLOR_TEXT
-    } else {
-        COLOR_TEXT_SECONDARY
+        (
+            Color32::from_white_alpha(10),
+            egui::Stroke::new(1.0_f32, COLOR_BORDER_MEDIUM),
+            COLOR_TEXT_SECONDARY,
+        )
     };
     let inner = egui::Frame::none()
         .fill(fill)
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::symmetric(14.0, 6.0))
+        .stroke(stroke)
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(12.0, 5.0))
         .show(ui, |ui| {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(label)
                         .color(text_color)
                         .strong()
-                        .size(14.0),
+                        .size(12.0),
                 )
                 .selectable(false),
             );
@@ -594,10 +602,10 @@ fn draw_logs(state: &mut AppState, ui: &mut egui::Ui) {
                 .size(18.0),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Clear").clicked() {
+            if ghost_button(ui, "CLEAR", Vec2::new(70.0, 28.0)).clicked() {
                 state.logs.clear();
             }
-            if ui.button("Back to Previews").clicked() {
+            if ghost_button(ui, "BACK TO PREVIEWS", Vec2::new(132.0, 28.0)).clicked() {
                 state.show_logs = false;
             }
         });
@@ -608,8 +616,9 @@ fn draw_logs(state: &mut AppState, ui: &mut egui::Ui) {
         .stick_to_bottom(true)
         .show(ui, |ui| {
             egui::Frame::none()
-                .fill(COLOR_CARD)
-                .rounding(4.0)
+                .fill(COLOR_CARD_SURFACE)
+                .stroke(egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE))
+                .rounding(10.0)
                 .inner_margin(12.0)
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
@@ -629,7 +638,7 @@ fn draw_tweaks(state: &mut AppState, ui: &mut egui::Ui) {
                 .size(18.0),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Back to Previews").clicked() {
+            if ghost_button(ui, "BACK TO PREVIEWS", Vec2::new(132.0, 28.0)).clicked() {
                 state.show_tweaks = false;
             }
         });
@@ -649,8 +658,9 @@ fn draw_tweaks(state: &mut AppState, ui: &mut egui::Ui) {
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         egui::Frame::none()
-            .fill(COLOR_CARD)
-            .rounding(4.0)
+            .fill(COLOR_CARD_SURFACE)
+            .stroke(egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE))
+            .rounding(10.0)
             .inner_margin(16.0)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -689,8 +699,9 @@ fn draw_tweaks(state: &mut AppState, ui: &mut egui::Ui) {
 
                 ui.add_space(4.0);
                 egui::Frame::none()
-                    .fill(COLOR_INSPECTOR_BOX)
-                    .rounding(egui::Rounding::same(6.0))
+                    .fill(COLOR_CARD_SURFACE)
+                    .stroke(egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE))
+                    .rounding(egui::Rounding::same(10.0))
                     .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -725,8 +736,9 @@ fn tweak_card(
     safe: &str,
 ) {
     egui::Frame::none()
-        .fill(COLOR_INSPECTOR_BOX)
-        .rounding(egui::Rounding::same(6.0))
+        .fill(COLOR_CARD_SURFACE)
+        .stroke(egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE))
+        .rounding(egui::Rounding::same(10.0))
         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -803,13 +815,18 @@ fn draw_texture_card(
     }
 
     let bg = if is_hovered {
-        brighten_color(COLOR_CARD, 1.16)
+        brighten_color(COLOR_CARD_SURFACE, 1.14)
     } else if is_selected {
-        brighten_color(COLOR_CARD, 1.10)
+        brighten_color(COLOR_CARD_SURFACE, 1.08)
     } else {
-        COLOR_CARD
+        COLOR_CARD_SURFACE
     };
     painter.rect_filled(draw_rect, rounding, bg);
+    painter.rect_stroke(
+        draw_rect,
+        rounding,
+        egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE),
+    );
 
     if let Some(PreviewState::Ready(texture)) = state.previews.get(&(tab_id, index)) {
         paint_texture_fitted(ui, draw_rect.shrink(4.0), texture);
@@ -836,13 +853,13 @@ fn draw_texture_card(
         painter.rect_stroke(
             draw_rect,
             rounding,
-            egui::Stroke::new(2.0_f32, COLOR_CARD_SELECTED),
+            egui::Stroke::new(2.0_f32, COLOR_BTN_BLUE),
         );
     } else if is_hovered {
         painter.rect_stroke(
             draw_rect,
             rounding,
-            egui::Stroke::new(1.5_f32, COLOR_ACCENT_ORANGE),
+            egui::Stroke::new(1.5_f32, COLOR_PRIMARY_BORDER),
         );
     }
 
@@ -876,17 +893,17 @@ fn draw_full_preview(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                 .size(18.0),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("Back").clicked() {
+            if ghost_button(ui, "BACK", Vec2::new(64.0, 28.0)).clicked() {
                 show_full_preview = false;
             }
-            if ui.button("Reset").clicked() {
+            if ghost_button(ui, "RESET", Vec2::new(76.0, 28.0)).clicked() {
                 full_preview_zoom = 1.0;
                 full_preview_pan = Vec2::ZERO;
             }
-            if ui.button("−").clicked() {
+            if ghost_button(ui, "−", Vec2::new(34.0, 28.0)).clicked() {
                 full_preview_zoom = (full_preview_zoom / 1.15).clamp(0.1, 20.0);
             }
-            if ui.button("+").clicked() {
+            if ghost_button(ui, "+", Vec2::new(34.0, 28.0)).clicked() {
                 full_preview_zoom = (full_preview_zoom * 1.15).clamp(0.1, 20.0);
             }
         });
@@ -898,7 +915,12 @@ fn draw_full_preview(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
     let response = response.on_hover_cursor(CursorIcon::Grab);
 
     ui.painter()
-        .rect_filled(rect, egui::Rounding::same(6.0), COLOR_CARD);
+        .rect_filled(rect, egui::Rounding::same(10.0), COLOR_CARD_SURFACE);
+    ui.painter().rect_stroke(
+        rect,
+        egui::Rounding::same(10.0),
+        egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE),
+    );
     let content_rect = rect.shrink(8.0);
     if state.show_transparency_bg {
         paint_checkerboard(
@@ -1122,7 +1144,7 @@ fn draw_grid(state: &mut AppState, _ctx: &egui::Context, ui: &mut egui::Ui) {
                                     Vec2::new(ui.available_width(), 1.0),
                                     Sense::hover(),
                                 );
-                                ui.painter().rect_filled(line_rect, 0.0, COLOR_LABEL_BLUE);
+                                ui.painter().rect_filled(line_rect, 0.0, COLOR_BORDER_SUBTLE);
                                 ui.add_space(spacing);
 
                                 if expanded {

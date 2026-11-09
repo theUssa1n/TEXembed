@@ -1,10 +1,12 @@
 use std::fmt::Write as _;
 
 use super::constants::{
-    COLOR_ACCENT_ORANGE, COLOR_ACCENT_RED, COLOR_BG, COLOR_BTN_BLUE, COLOR_BTN_BLUE_HOVER,
-    COLOR_CARD, COLOR_GRAD_BLUE_BOTTOM, COLOR_GRAD_GRAY_BOTTOM, COLOR_GRAD_ORANGE_BOTTOM,
-    COLOR_INSPECTOR_BOX, COLOR_LABEL_BLUE, COLOR_PANEL, COLOR_TAB_ACTIVE, COLOR_TAB_INACTIVE,
-    COLOR_TEXT, COLOR_TEXT_SECONDARY, INSPECTOR_CONTENT_WIDTH, INSPECTOR_WIDTH, LEFT_PANEL_WIDTH,
+    COLOR_ACCENT_ORANGE, COLOR_ACCENT_RED, COLOR_BG, COLOR_BTN_BLUE, COLOR_CARD,
+    COLOR_GRAD_BLUE_BOTTOM, COLOR_GRAD_GRAY_BOTTOM, COLOR_GRAD_ORANGE_BOTTOM,
+    COLOR_INSPECTOR_BOX, COLOR_LABEL_BLUE, COLOR_PANEL, COLOR_PRIMARY_GLOW,
+    COLOR_PRIMARY_TRANSLUCENT, COLOR_RAIL_HOVER, COLOR_RAIL_SEPARATOR, COLOR_TAB_ACTIVE,
+    COLOR_TAB_INACTIVE, COLOR_TEXT, COLOR_TEXT_SECONDARY, INSPECTOR_CONTENT_WIDTH,
+    INSPECTOR_WIDTH, LEFT_PANEL_WIDTH,
 };
 use super::preview::format_pixel_format;
 use super::state::{AppState, BatchReplaceRule, PreviewState};
@@ -941,51 +943,69 @@ fn draw_left_panel(state: &mut AppState, ctx: &egui::Context) {
                                  icon: Option<&TextureHandle>,
                                  text: Option<&'static str>|
              -> egui::Response {
-                let btn_rect = ui.available_rect_before_wrap();
-                let btn_rect = Rect::from_min_size(btn_rect.min, Vec2::new(LEFT_PANEL_WIDTH, 50.0));
+                let slot_rect = ui.available_rect_before_wrap();
+                let slot_rect =
+                    Rect::from_min_size(slot_rect.min, Vec2::new(LEFT_PANEL_WIDTH, 50.0));
+
+                let btn_inset = 6.0;
+                let btn_w = LEFT_PANEL_WIDTH - 2.0 * btn_inset;
+                let btn_h = 38.0;
+                let btn_rect = Rect::from_center_size(
+                    slot_rect.center(),
+                    Vec2::new(btn_w, btn_h),
+                );
+
                 let response = ui
                     .interact(btn_rect, egui::Id::new(id), Sense::click())
                     .on_hover_cursor(CursorIcon::PointingHand);
                 let painter = ui.painter();
 
-                let bg_color = if response.hovered() {
-                    COLOR_BTN_BLUE_HOVER
-                } else if is_active {
-                    COLOR_BTN_BLUE
+                let rounding = egui::Rounding::same(10.0);
+
+                let fill = if is_active {
+                    COLOR_PRIMARY_TRANSLUCENT
+                } else if response.hovered() {
+                    COLOR_RAIL_HOVER
                 } else {
                     Color32::TRANSPARENT
                 };
-
-                let rounding = egui::Rounding {
-                    nw: 0.0,
-                    sw: 0.0,
-                    ne: 6.0,
-                    se: 6.0,
-                };
-
-                if response.hovered() || is_active {
-                    painter.rect_filled(btn_rect, rounding, bg_color);
-                    if response.hovered() {
-                        painter.rect_stroke(
-                            btn_rect,
-                            rounding,
-                            egui::Stroke::new(1.0_f32, Color32::from_rgb(120, 170, 240)),
-                        );
-                    }
+                if fill.a() > 0 {
+                    painter.rect_filled(btn_rect, rounding, fill);
                 }
 
+                // Active state: soft primary glow halo.
+                if is_active {
+                    painter.rect_stroke(
+                        btn_rect,
+                        rounding,
+                        egui::Stroke::new(1.0_f32, COLOR_PRIMARY_GLOW),
+                    );
+                    // Left indicator stripe (mirrors Submarine's `w-0.5 h-1/2`).
+                    let stripe_w = 2.5;
+                    let stripe_h = btn_h * 0.5;
+                    let stripe_rect = Rect::from_center_size(
+                        Pos2::new(btn_rect.left() + 1.5, btn_rect.center().y),
+                        Vec2::new(stripe_w, stripe_h),
+                    );
+                    painter.rect_filled(stripe_rect, egui::Rounding::same(2.0), COLOR_BTN_BLUE);
+                }
+
+                let icon_color = if is_active {
+                    COLOR_BTN_BLUE
+                } else if response.hovered() {
+                    COLOR_TEXT
+                } else {
+                    COLOR_TEXT_SECONDARY
+                };
+
                 if let Some(tex) = icon {
-                    let icon_size = Vec2::splat(24.0);
+                    let icon_size = Vec2::splat(26.0);
                     let icon_rect = Rect::from_center_size(btn_rect.center(), icon_size);
                     painter.image(
                         tex.id(),
                         icon_rect,
                         Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                        if is_active || response.hovered() {
-                            Color32::WHITE
-                        } else {
-                            COLOR_TEXT_SECONDARY
-                        },
+                        icon_color,
                     );
                 } else if let Some(text) = text {
                     painter.text(
@@ -993,11 +1013,7 @@ fn draw_left_panel(state: &mut AppState, ctx: &egui::Context) {
                         egui::Align2::CENTER_CENTER,
                         text,
                         FontId::new(16.0, FontFamily::Proportional),
-                        if is_active || response.hovered() {
-                            Color32::WHITE
-                        } else {
-                            COLOR_TEXT_SECONDARY
-                        },
+                        icon_color,
                     );
                 }
 
@@ -1034,6 +1050,8 @@ fn draw_left_panel(state: &mut AppState, ctx: &egui::Context) {
                 state.show_open_folder_options = true;
             }
 
+            ui.add_space(8.0);
+            draw_rail_separator(ui);
             ui.add_space(8.0);
 
             let logs_btn = draw_side_btn(
@@ -1110,6 +1128,16 @@ fn draw_left_panel(state: &mut AppState, ctx: &egui::Context) {
                 state.offer_tooltip(egui::Id::new("tweaks_tt"), "Tweaks");
             }
         });
+}
+
+fn draw_rail_separator(ui: &mut egui::Ui) {
+    let available = ui.available_rect_before_wrap();
+    let w = available.width() - 16.0;
+    let x = available.min.x + (available.width() - w) / 2.0;
+    let y = available.min.y;
+    let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, 1.0));
+    ui.painter().rect_filled(rect, egui::Rounding::same(1.0), COLOR_RAIL_SEPARATOR);
+    ui.allocate_space(Vec2::new(LEFT_PANEL_WIDTH, 1.0));
 }
 
 fn draw_status_bar(state: &AppState, ctx: &egui::Context) {

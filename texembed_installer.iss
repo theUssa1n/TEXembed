@@ -4,6 +4,7 @@
 #define MyAppName "TEXembed"
 #define MyAppPublisher "SplitSecond Community"
 #define MyAppExeName "texembed.exe"
+#define MyAppVersion "0.1.0"
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application.
@@ -11,7 +12,12 @@
 ; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
 AppId={{5B7E8F2A-3C4D-4E5F-6A7B-8C9D0E1F2A3B}
 AppName={#MyAppName}
-AppVerName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
+VersionInfoVersion={#MyAppVersion}
+VersionInfoDescription={#MyAppName} Setup
+PrivilegesRequired=admin
+SetupMutex=TEXembedSetupMutex
 AppPublisher={#MyAppPublisher}
 DefaultDirName={commonpf}\TEXembed
 DefaultGroupName={#MyAppName}
@@ -39,11 +45,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
 ; Remove leftover per-user registrations from older (32-bit) versions.
@@ -57,45 +62,14 @@ Root: HKCU; Subkey: "Software\Classes\splitsecond.texembed.streamtex"; ValueType
 ; Register .textures file extension (machine-wide, since Setup runs elevated)
 Root: HKLM; Subkey: "Software\Classes\.textures"; ValueType: string; ValueData: "splitsecond.texembed.textures"; Flags: uninsdeletevalue
 Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures"; ValueType: string; ValueData: "TEXTURES File"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures\DefaultIcon"; ValueType: string; ValueData: "{app}\icon.ico"
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"
 Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.textures\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 ; Register .streamtex file extension (machine-wide, since Setup runs elevated)
 Root: HKLM; Subkey: "Software\Classes\.streamtex"; ValueType: string; ValueData: "splitsecond.texembed.streamtex"; Flags: uninsdeletevalue
 Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex"; ValueType: string; ValueData: "STREAMTEX File"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex\DefaultIcon"; ValueType: string; ValueData: "{app}\icon.ico"
+Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"
 Root: HKLM; Subkey: "Software\Classes\splitsecond.texembed.streamtex\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName,'&','&&')}}"; Flags: nowait postinstall skipifsilent
-
-[Code]
-const
-  SHCNE_ASSOCCHANGED = $08000000;
-  SHCNF_IDLIST = $0000;
-
-procedure SHChangeNotify(wEventId: Longint; uFlags: Longint; dwItem1, dwItem2: Longint);
-  external 'SHChangeNotify@shell32.dll stdcall';
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssPostInstall then
-  begin
-    { Notify Explorer to refresh file associations/icons without killing
-      or restarting explorer.exe. }
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, 0, 0);
-  end;
-end;
-
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-begin
-  if CurUninstallStep = usPostUninstall then
-  begin
-    { Notify Explorer to refresh file associations/icons.
-      This does NOT kill or restart explorer.exe, so it works safely
-      regardless of the uninstaller's elevation level or user session,
-      and ShellExecAsOriginalUser/killing explorer is not usable here anyway
-      (that function is only allowed during Setup, not Uninstall). }
-    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, 0, 0);
-  end;
-end;
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName,'&','&&')}}"; Flags: nowait postinstall skipifsilent runasoriginaluser

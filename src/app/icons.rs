@@ -11,7 +11,9 @@ pub(super) fn load_png_icon(
     let size = [rgba.width() as _, rgba.height() as _];
     let pixels = rgba.into_raw();
     let color_image = ColorImage::from_rgba_unmultiplied(size, &pixels);
-    Some(ctx.load_texture(name, color_image, TextureOptions::default()))
+    // Mipmapped sampling keeps the 128px sources clean when drawn at ~22px.
+    let options = TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
+    Some(ctx.load_texture(name, color_image, options))
 }
 
 pub fn load_icon() -> Option<egui::IconData> {
