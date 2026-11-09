@@ -18,6 +18,8 @@ Open `.textures` and `.streamtex` containers, preview every DDS inside them, exp
 
 > **Unofficial fan tool.** TEXembed is not affiliated with, endorsed by, or connected to the developers or publisher of Split/Second. It contains no game assets. You need your own copy of the game.
 
+<img width="1920" height="2098" alt="Screenshot (338)" src="https://github.com/user-attachments/assets/111f3841-e9ba-42b0-90ff-a282fd0501b8" />
+
 ---
 
 ## Table of contents
