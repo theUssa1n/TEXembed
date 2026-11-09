@@ -12,6 +12,7 @@ Open `.textures` and `.streamtex` containers, preview every DDS inside them, exp
 ![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D6)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 ![UI: egui](https://img.shields.io/badge/UI-egui%20%2F%20eframe-8A63D2)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/EEvCkD8fA3)
 
 </div>
 
