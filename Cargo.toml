@@ -2,6 +2,10 @@
 name = "texembed"
 version = "0.1.0"
 edition = "2021"
+description = "Texture viewer, extractor and replacer for Split/Second (PC) .textures and .streamtex files"
+license = "MIT"
+repository = "https://github.com/theUssa1n/TEXembed"
+readme = "README.md"
 
 [build-dependencies]
 winres = "0.1"
