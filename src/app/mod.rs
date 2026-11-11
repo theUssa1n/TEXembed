@@ -1,9 +1,13 @@
 pub mod constants;
+mod grid_layout;
 pub mod icons;
+mod inspector;
 pub mod ipc;
+mod loading;
 pub mod panel_central;
 pub mod panels_shell;
 pub mod preview;
+mod preview_cache;
 pub mod state;
 pub mod ui;
 pub mod volume;

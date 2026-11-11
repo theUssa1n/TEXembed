@@ -1,143 +1,59 @@
-use std::time::Duration;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use eframe::egui;
 use egui::{Color32, FontFamily};
 
 use super::constants::{COLOR_BG, COLOR_BTN_BLUE, COLOR_BTN_GRAY, COLOR_PANEL, COLOR_TEXT};
 use super::icons::load_png_icon;
-use super::state::{AppState, FolderGallery, FolderLoadResult, Tab};
+use super::state::AppState;
 
 use super::{panel_central, panels_shell};
 
+const MAX_IPC_MESSAGES_PER_FRAME: usize = 16;
+
+fn drain_ipc_messages(receiver: &Receiver<String>) -> (Vec<String>, bool) {
+    let mut messages = Vec::new();
+    let mut disconnected = false;
+    for _ in 0..MAX_IPC_MESSAGES_PER_FRAME {
+        match receiver.try_recv() {
+            Ok(message) => messages.push(message),
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+        }
+    }
+    (messages, disconnected)
+}
+
 impl eframe::App for AppState {
-    #[allow(clippy::too_many_lines)]
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_tooltip = None;
-        let mut visuals = egui::Visuals::dark();
-        let subtle_border_color = Color32::from_rgb(22, 22, 24);
-        let panel_border = egui::Stroke::new(1.0_f32, subtle_border_color);
-        visuals.window_stroke = panel_border;
-        visuals.widgets.noninteractive.bg_stroke = panel_border;
-        ctx.set_visuals(visuals);
+        self.process_load_results(ctx);
+        self.process_ipc_messages(ctx);
+        self.initialize_style(ctx);
 
-        if self.ipc_restore_was_minimized.is_none() {
-            self.ipc_restore_was_minimized = Some(false);
-            self.ipc_restore_was_maximized = Some(false);
-        }
-
-        if let Some(rx) = &self.ipc_receiver {
-            while let Ok(path_str) = rx.try_recv() {
-                self.file_load_queue
-                    .push_back(std::path::PathBuf::from(path_str));
-
-                match (
-                    self.ipc_restore_was_minimized,
-                    self.ipc_restore_was_maximized,
-                ) {
-                    (Some(true), _) => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-                    }
-                    (Some(false), Some(true)) => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-                    }
-                    _ => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    }
-                }
-
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            }
-        }
-
-        let folder_load_result =
-            self.folder_load_receiver
-                .as_ref()
-                .and_then(|rx| match rx.try_recv() {
-                    Ok(r) => Some(r),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        Some(FolderLoadResult::Err("Folder loading failed.".to_string()))
-                    }
-                });
-
-        if let Some(result) = folder_load_result {
-            self.folder_load_receiver = None;
-            match result {
-                FolderLoadResult::Ok(build) => {
-                    let tab_id = self.next_tab_id;
-                    self.next_tab_id += 1;
-
-                    let file = texembed::TextureFile {
-                        file_type: texembed::FileType::Textures,
-                        path: build.folder_path,
-                        dds_list: Vec::new(),
-                        original_bytes: Vec::new(),
-                    };
-
-                    let tab = Tab {
-                        id: tab_id,
-                        file,
-                        selected_index: Some(0),
-                        has_unsaved_changes: false,
-                        show_full_preview: false,
-                        full_preview_zoom: 1.0,
-                        full_preview_pan: egui::Vec2::ZERO,
-                        replace_backups: std::collections::HashMap::new(),
-                        folder_gallery: Some(FolderGallery {
-                            files: build.files,
-                            index_map: build.index_map,
-                            file_global_ranges: build.file_global_ranges,
-                            file_expanded: build.file_expanded,
-                            include_multi_texture: build.include_multi_texture,
-                        }),
-                    };
-
-                    self.tabs.push(tab);
-                    self.active_tab_id = Some(tab_id);
-                    self.enqueue_preview_load(tab_id, 0);
-                    self.log("Loaded folder gallery!");
-                    self.error_message = None;
-                    ctx.request_repaint();
-                }
-                FolderLoadResult::Err(err) => {
-                    self.error_message = Some(err);
-                }
-            }
-        }
-
-        if !self.file_load_queue.is_empty() {
-            let budget = Duration::from_millis(6);
-            let queue_len = self.file_load_queue.len();
-            let max_this_frame = match queue_len {
-                0..=1 => 1,
-                2..=5 => 2,
-                6..=20 => 3,
-                _ => 4,
-            }
-            .min(6);
-
-            let start = std::time::Instant::now();
-            let mut loaded = 0usize;
-
-            while loaded < max_this_frame && start.elapsed() < budget {
-                let Some(path) = self.file_load_queue.pop_front() else {
-                    break;
-                };
-                self.try_load_path(&path);
-                loaded += 1;
-            }
-
-            if loaded > 0 {
-                ctx.request_repaint();
-            }
-        }
-
+        let full_preview = self.active_full_preview_key();
+        self.previews.retain_full(full_preview);
         self.process_preview_results(ctx);
+        panels_shell::draw(self, ctx);
+        let full_preview = self.active_full_preview_key();
+        self.previews.retain_full(full_preview);
+        panel_central::draw(self, ctx);
+        let full_preview = self.active_full_preview_key();
+        self.previews.retain_full(full_preview);
         self.dispatch_preview_jobs(ctx);
+        self.loading.dispatch_jobs(ctx);
+        self.delayed_tooltip(ctx, self.frame_tooltip);
+    }
+}
 
+impl AppState {
+    fn initialize_style(&mut self, ctx: &egui::Context) {
         if !self.style_initialized {
             let mut style = (*ctx.style()).clone();
+            style.visuals = egui::Visuals::dark();
 
             for font_id in style.text_styles.values_mut() {
                 font_id.family = FontFamily::Proportional;
@@ -180,9 +96,93 @@ impl eframe::App for AppState {
             self.icon_tweaks =
                 load_png_icon(ctx, "tweaks_icon", include_bytes!("../../tweaks.png"));
         }
+    }
 
-        panels_shell::draw(self, ctx);
-        panel_central::draw(self, ctx);
-        self.delayed_tooltip(ctx, self.frame_tooltip);
+    fn process_ipc_messages(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = &self.ipc_receiver else {
+            return;
+        };
+        let (messages, disconnected) = drain_ipc_messages(receiver);
+        if messages.len() == MAX_IPC_MESSAGES_PER_FRAME {
+            ctx.request_repaint();
+        }
+        if !messages.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        for path in messages {
+            if !path.is_empty() {
+                self.queue_file_load(std::path::PathBuf::from(path));
+            }
+        }
+        if disconnected {
+            self.ipc_receiver = None;
+            self.log(
+                "IPC listener disconnected; opening files from this window is still available.",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use super::*;
+
+    #[test]
+    fn ipc_draining_is_bounded_and_keeps_message_order() {
+        let (sender, receiver) = mpsc::channel();
+        for index in 0..MAX_IPC_MESSAGES_PER_FRAME + 3 {
+            sender.send(index.to_string()).unwrap();
+        }
+        let (first, disconnected) = drain_ipc_messages(&receiver);
+        assert_eq!(first.len(), MAX_IPC_MESSAGES_PER_FRAME);
+        assert_eq!(first[0], "0");
+        assert!(!disconnected);
+        drop(sender);
+        let (second, disconnected) = drain_ipc_messages(&receiver);
+        assert_eq!(second.len(), 3);
+        assert_eq!(second[0], MAX_IPC_MESSAGES_PER_FRAME.to_string());
+        assert!(disconnected);
+    }
+
+    #[test]
+    fn activation_does_not_enqueue_an_empty_path() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(String::new()).unwrap();
+        let mut state = AppState {
+            ipc_receiver: Some(receiver),
+            ..Default::default()
+        };
+        state.process_ipc_messages(&egui::Context::default());
+        assert_eq!(state.loading.pending_count(), 0);
+        assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn ipc_paths_preserve_unicode_and_whitespace() {
+        let (sender, receiver) = mpsc::channel();
+        let path = "C:\\textures\\ leading_\u{0628} .streamtex ";
+        sender.send(path.to_string()).unwrap();
+        let (messages, disconnected) = drain_ipc_messages(&receiver);
+        assert_eq!(messages, [path]);
+        assert!(!disconnected);
+    }
+
+    #[test]
+    fn style_initialization_does_not_reset_customized_visuals() {
+        let mut state = AppState::default();
+        let ctx = egui::Context::default();
+        state.initialize_style(&ctx);
+        assert!(state.style_initialized);
+        let mut style = (*ctx.style()).clone();
+        let custom = Color32::from_rgb(12, 34, 56);
+        style.visuals.window_fill = custom;
+        style.visuals.widgets.inactive.bg_fill = custom;
+        ctx.set_style(style);
+        state.initialize_style(&ctx);
+        assert_eq!(ctx.style().visuals.window_fill, custom);
+        assert_eq!(ctx.style().visuals.widgets.inactive.bg_fill, custom);
     }
 }

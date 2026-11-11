@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
@@ -7,7 +9,9 @@ use super::textures::{
     dds_record_pixel_format, load_streamed_texture_entries, StreamedTextureEntry,
 };
 use crate::dds::parse_dds_header;
-use crate::model::{DdsInfo, FileType, TextureFile};
+use crate::model::{
+    DdsInfo, FileType, StreamtexBinding, StreamtexLayout, StreamtexRecord, TextureFile,
+};
 
 /// `DDSCAPS2_CUBEMAP`: set in the DDS header when a texture has six faces.
 const DDSCAPS2_CUBEMAP: u32 = 0x200;
@@ -62,6 +66,9 @@ fn dds_payload_len(dds_bytes: &[u8]) -> Option<usize> {
     let width = u32_at(dds_bytes, 16).max(1);
     let height = u32_at(dds_bytes, 12).max(1);
     let mipmap_count = u32_at(dds_bytes, 28).max(1);
+    if mipmap_count > 32 {
+        return None;
+    }
     let caps2 = u32_at(dds_bytes, 112);
     let sides = usize::try_from(dds_sides(dds_bytes)).ok()?;
     let depth = if caps2 & DDSCAPS2_VOLUME != 0 {
@@ -73,21 +80,31 @@ fn dds_payload_len(dds_bytes: &[u8]) -> Option<usize> {
     let mut chain = 0usize;
     let mut current_width = width;
     let mut current_height = height;
+    let mut current_depth = depth;
     for _ in 0..mipmap_count {
         let blocks_w = usize::try_from(current_width.div_ceil(edge)).ok()?;
         let blocks_h = usize::try_from(current_height.div_ceil(edge)).ok()?;
-        chain = chain.checked_add(blocks_w.checked_mul(blocks_h)?.checked_mul(block_bytes)?)?;
+        let level = blocks_w
+            .checked_mul(blocks_h)?
+            .checked_mul(block_bytes)?
+            .checked_mul(current_depth)?;
+        chain = chain.checked_add(level)?;
         current_width = (current_width / 2).max(1);
         current_height = (current_height / 2).max(1);
+        current_depth = (current_depth / 2).max(1);
     }
 
-    DDS_HEADER_LEN.checked_add(chain.checked_mul(sides)?.checked_mul(depth)?)
+    DDS_HEADER_LEN.checked_add(chain.checked_mul(sides)?)
 }
 
 /// Whether `at` is a position where a new record can begin: the start of the
 /// next `[len]["DDS "]` pair, or the end of the file.
 fn record_boundary(bytes: &[u8], at: usize) -> bool {
-    at == bytes.len() || (at + 8 <= bytes.len() && &bytes[at + 4..at + 8] == b"DDS ")
+    at == bytes.len()
+        || at
+            .checked_add(8)
+            .and_then(|end| bytes.get(at + 4..end))
+            .is_some_and(|magic| magic == b"DDS ")
 }
 
 /// Shape of a `.streamtex` record: `sides`, `width`, `height`, `mipmap_count`,
@@ -208,6 +225,81 @@ fn map_sidecar_names(
         .collect()
 }
 
+fn matching_shape(record: RecordKey, entry: RecordKey) -> bool {
+    record.0 == entry.0
+        && record.1 == entry.1
+        && record.2 == entry.2
+        && record.3 == entry.3
+        && (record.4 == 0 || entry.4 == 0 || record.4 == entry.4)
+}
+
+fn bind_sidecar(
+    layout: &StreamtexLayout,
+    entries: &[StreamedTextureEntry],
+) -> Vec<StreamtexBinding> {
+    let mut offset = 0usize;
+    let records: Vec<_> = layout
+        .records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let current = offset;
+            offset += 4 + record.bytes.len();
+            let key = parse_dds_header(&record.bytes)
+                .ok()
+                .map(|header| dds_record_key(&record.bytes, header));
+            (index, current, key)
+        })
+        .collect();
+    let mut bindings = HashMap::new();
+    let mut used = std::collections::HashSet::new();
+    for (record_index, record_offset, key) in &records {
+        let mut candidates = entries.iter().enumerate().filter(|(_, entry)| {
+            entry.data_offset as usize == *record_offset
+                && key.is_none_or(|key| matching_shape(key, entry_record_key(entry)))
+        });
+        if let Some((entry_index, _)) = candidates.next() {
+            if candidates.next().is_none() && used.insert(entry_index) {
+                bindings.insert(*record_index, entry_index);
+            }
+        }
+    }
+    let valid: Vec<_> = records
+        .iter()
+        .filter_map(|(index, _, key)| key.map(|key| (*index, key)))
+        .collect();
+    if entries.len() >= valid.len() && !valid.is_empty() {
+        let mut shifts = (0..=entries.len() - valid.len()).filter(|shift| {
+            valid.iter().enumerate().all(|(position, (index, key))| {
+                let entry_index = position + shift;
+                matching_shape(*key, entry_record_key(&entries[entry_index]))
+                    && bindings
+                        .get(index)
+                        .is_none_or(|bound| *bound == entry_index)
+                    && (!used.contains(&entry_index) || bindings.get(index) == Some(&entry_index))
+            })
+        });
+        if let Some(shift) = shifts.next() {
+            if shifts.next().is_none() {
+                for (position, (index, _)) in valid.iter().enumerate() {
+                    bindings.insert(*index, position + shift);
+                }
+            }
+        }
+    }
+    let mut result: Vec<_> = bindings
+        .into_iter()
+        .map(|(record_index, entry)| StreamtexBinding {
+            record_index,
+            catalog_index: entries[entry].catalog_index,
+            entry_index: entries[entry].entry_index,
+            record_id: entries[entry].record_id,
+        })
+        .collect();
+    result.sort_by_key(|binding| binding.record_index);
+    result
+}
+
 /// Splits a `.streamtex` blob into its payloads.
 ///
 /// A record is `[u32 little-endian length][DDS payload]`, but a handful of
@@ -217,11 +309,11 @@ fn map_sidecar_names(
 /// candidate size that actually lands on a record boundary wins, and because
 /// the DDS header fully describes its payload, that recomputed size is
 /// preferred whenever both are plausible.
-fn read_streamtex_records(bytes: &[u8]) -> Vec<Vec<u8>> {
+fn read_streamtex_records(bytes: &[u8]) -> StreamtexLayout {
     let mut records = Vec::new();
     let mut position = 0usize;
 
-    while position + 4 <= bytes.len() {
+    while bytes.len() - position >= 4 {
         let payload_start = position + 4;
         let available = bytes.len() - payload_start;
         if available == 0 {
@@ -236,26 +328,33 @@ fn read_streamtex_records(bytes: &[u8]) -> Vec<Vec<u8>> {
         };
 
         let computed_len = computed.filter(|len| record_boundary(bytes, payload_start + len));
-        let declared_len =
-            (declared <= available && record_boundary(bytes, payload_start + declared))
-                .then_some(declared);
+        let declared_len = (declared <= available
+            && record_boundary(bytes, payload_start + declared))
+        .then_some(declared);
 
         let payload_len = match (computed_len, declared_len) {
             (Some(len), _) => len,
             (None, Some(len)) => len,
             // Neither candidate lands on a boundary: fall back to the most
             // trustworthy size known, or stop when nothing is usable.
-            (None, None) => match computed.or((declared <= available).then_some(declared)) {
+            (None, None) => match (declared <= available).then_some(declared).or(computed) {
                 Some(len) => len,
                 None => break,
             },
         };
 
-        records.push(bytes[payload_start..payload_start + payload_len].to_vec());
+        records.push(StreamtexRecord {
+            length_prefix: u32_at(bytes, position).to_le_bytes(),
+            bytes: Arc::from(&bytes[payload_start..payload_start + payload_len]),
+        });
         position = payload_start + payload_len;
     }
 
-    records
+    StreamtexLayout {
+        records,
+        trailing_bytes: Arc::from(&bytes[position..]),
+        sidecar_bindings: Vec::new(),
+    }
 }
 
 /// Loads a `.streamtex` file and extracts embedded DDS payloads.
@@ -265,18 +364,25 @@ fn read_streamtex_records(bytes: &[u8]) -> Vec<Vec<u8>> {
 /// Returns an error when the file cannot be read.
 pub fn load_streamtex_file(path: PathBuf) -> Result<TextureFile> {
     let original_bytes = fs::read(&path)?;
-    let textures = read_streamtex_records(&original_bytes);
+    let mut layout = read_streamtex_records(&original_bytes);
     let sidecar_entries = load_streamtex_sidecar_entries(&path);
+    if let Some(entries) = &sidecar_entries {
+        layout.sidecar_bindings = bind_sidecar(&layout, entries);
+    }
 
-    let headers: Vec<Option<(u32, u32, u32, u32)>> = textures
+    let headers: Vec<Option<(u32, u32, u32, u32)>> = layout
+        .records
         .iter()
-        .map(|bytes| parse_dds_header(bytes).ok())
+        .map(|record| parse_dds_header(&record.bytes).ok())
         .collect();
     let names = sidecar_entries.as_deref().map(|entries| {
-        let records: Vec<RecordKey> = textures
+        let records: Vec<RecordKey> = layout
+            .records
             .iter()
             .zip(&headers)
-            .filter_map(|(bytes, header)| header.map(|header| dds_record_key(bytes, header)))
+            .filter_map(|(record, header)| {
+                header.map(|header| dds_record_key(&record.bytes, header))
+            })
             .collect();
         map_sidecar_names(&records, entries)
     });
@@ -284,34 +390,54 @@ pub fn load_streamtex_file(path: PathBuf) -> Result<TextureFile> {
     let mut dds_list = Vec::new();
     let mut name_index = 0;
 
-    for (i, bytes) in textures.into_iter().enumerate() {
+    for (i, record) in layout.records.iter().enumerate() {
         if let Some((width, height, mipmap_count, pixel_format)) = headers[i] {
-            let name = names
-                .as_ref()
-                .and_then(|names| names.get(name_index))
-                .and_then(|name| name.as_ref())
+            let bound_name = layout
+                .sidecar_bindings
+                .iter()
+                .find(|binding| binding.record_index == i)
+                .and_then(|binding| {
+                    sidecar_entries.as_ref()?.iter().find(|entry| {
+                        entry.catalog_index == binding.catalog_index
+                            && entry.entry_index == binding.entry_index
+                    })
+                })
+                .map(|entry| &entry.name);
+            let name = bound_name
+                .or_else(|| {
+                    names
+                        .as_ref()
+                        .and_then(|names| names.get(name_index))
+                        .and_then(|name| name.as_ref())
+                })
                 .filter(|name| !name.is_empty())
                 .cloned()
                 .unwrap_or_else(|| format!("{i}.dds"));
             name_index += 1;
             dds_list.push(DdsInfo {
                 name,
-                bytes: bytes.into(),
+                bytes: Arc::clone(&record.bytes),
                 width,
                 height,
                 mipmap_count,
                 pixel_format,
                 catalog_index: 0,
                 entry_index: i,
+                modified: false,
             });
         }
+    }
+
+    if dds_list.is_empty() {
+        return Err(anyhow!("[Streamtex file] No recognizable DDS records; the file may be unsupported or malformed"));
     }
 
     Ok(TextureFile {
         file_type: FileType::Streamtex,
         path,
         dds_list,
-        original_bytes,
+        original_bytes: Vec::new(),
+        streamtex_layout: Some(layout),
     })
 }
 
@@ -321,26 +447,84 @@ pub fn load_streamtex_file(path: PathBuf) -> Result<TextureFile> {
 ///
 /// Returns an error when a DDS payload length does not fit in `u32` or the
 /// output file cannot be written.
-pub fn save_streamtex_file(texture_file: &TextureFile, path: &PathBuf) -> Result<()> {
-    let mut result_bytes = Vec::new();
-    for dds_info in &texture_file.dds_list {
-        let length = u32::try_from(dds_info.bytes.len()).map_err(|_| {
-            anyhow!(
-                "[Save Streamtex] DDS payload is too large to store: {} bytes",
-                dds_info.bytes.len()
-            )
-        })?;
-        result_bytes.extend_from_slice(&length.to_le_bytes());
-        result_bytes.extend_from_slice(dds_info.bytes.as_ref());
-    }
-    fs::write(path, &result_bytes).map_err(|e| {
+pub fn save_streamtex_file(texture_file: &TextureFile, path: &Path) -> Result<()> {
+    let result_bytes = serialize_streamtex(texture_file)?;
+    super::storage::atomic_write(path, &result_bytes)
+}
+
+pub fn save_streamtex_with_sidecar(
+    texture_file: &TextureFile,
+    path: &Path,
+    sidecar: &Path,
+) -> Result<()> {
+    let stream_bytes = serialize_streamtex(texture_file)?;
+    let sidecar_bytes = fs::read(sidecar).map_err(|error| {
         anyhow!(
-            "[Save Streamtex] Failed to write file to {}: {}",
-            path.display(),
-            e
+            "[Save Streamtex] Cannot read sidecar {}: {error}; no files were saved",
+            sidecar.display()
         )
     })?;
-    Ok(())
+    let patched_sidecar = super::textures::serialize_bound_sidecar(texture_file, &sidecar_bytes)?;
+    super::storage::write_pair((path, &stream_bytes), (sidecar, &patched_sidecar))
+}
+
+pub(super) fn streamtex_replacements(
+    texture_file: &TextureFile,
+) -> Result<HashMap<usize, &DdsInfo>> {
+    let layout = texture_file.streamtex_layout.as_ref().ok_or_else(|| {
+        anyhow!("[Save Streamtex] Original record layout is missing; reopen the file before saving")
+    })?;
+    let mut entries = HashMap::new();
+    for dds in &texture_file.dds_list {
+        if dds.catalog_index != 0 || dds.entry_index >= layout.records.len() {
+            return Err(anyhow!(
+                "[Save Streamtex] Invalid record index {}",
+                dds.entry_index
+            ));
+        }
+        if entries.insert(dds.entry_index, dds).is_some() {
+            return Err(anyhow!(
+                "[Save Streamtex] Duplicate record index {}",
+                dds.entry_index
+            ));
+        }
+        if dds.modified {
+            parse_dds_header(&dds.bytes)?;
+        }
+    }
+    Ok(entries)
+}
+
+pub(super) fn serialize_streamtex(texture_file: &TextureFile) -> Result<Vec<u8>> {
+    if texture_file.file_type != FileType::Streamtex {
+        return Err(anyhow!("[Save Streamtex] Expected a .streamtex document"));
+    }
+    let replacements = streamtex_replacements(texture_file)?;
+    let layout = texture_file
+        .streamtex_layout
+        .as_ref()
+        .ok_or_else(|| anyhow!("Missing stream layout"))?;
+    let mut result_bytes = Vec::new();
+    for (index, record) in layout.records.iter().enumerate() {
+        match replacements
+            .get(&index)
+            .filter(|dds| dds.modified && dds.bytes != record.bytes)
+        {
+            Some(dds) => {
+                let length = u32::try_from(dds.bytes.len()).map_err(|_| {
+                    anyhow!("[Save Streamtex] DDS payload exceeds the u32 size limit")
+                })?;
+                result_bytes.extend_from_slice(&length.to_le_bytes());
+                result_bytes.extend_from_slice(&dds.bytes);
+            }
+            None => {
+                result_bytes.extend_from_slice(&record.length_prefix);
+                result_bytes.extend_from_slice(&record.bytes);
+            }
+        }
+    }
+    result_bytes.extend_from_slice(&layout.trailing_bytes);
+    Ok(result_bytes)
 }
 
 #[cfg(test)]

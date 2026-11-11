@@ -1,39 +1,22 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
 use std::time::Instant;
 
 use egui::{TextureHandle, Vec2};
 use rfd::FileDialog;
 
 use texembed::{
-    load_streamtex_file, load_textures_file, parse_dds_header, patch_streamtex_sidecar,
-    save_streamtex_file, save_textures_file, DdsInfo, FileType, TextureFile,
+    parse_dds_header, save_streamtex_file, save_streamtex_with_sidecar, save_textures_file,
+    DdsInfo, FileType, TextureFile,
 };
 
+use super::loading::{GalleryBuild, LoadRequest, LoadedContent, LoadingManager};
 use super::preview::{
     decode_dds_rgba, format_pixel_format_u32, normalize_legacy_pixel_format, patch_legacy_fourcc,
 };
+use super::preview_cache::PreviewManager;
+pub(super) use super::preview_cache::PreviewState;
 use super::widgets::dds_export_name;
-
-pub(super) enum PreviewState {
-    Ready(TextureHandle),
-    Unsupported,
-}
-
-struct PreviewRequest {
-    tab_id: usize,
-    index: usize,
-    generation: u64,
-}
-
-struct PreviewDecodeResult {
-    tab_id: usize,
-    index: usize,
-    generation: u64,
-    texture_name: String,
-    decoded: Option<([usize; 2], Vec<u8>)>,
-}
 
 pub(super) struct FolderGallery {
     pub(super) files: Vec<TextureFile>,
@@ -41,20 +24,7 @@ pub(super) struct FolderGallery {
     pub(super) file_global_ranges: Vec<std::ops::Range<usize>>,
     pub(super) file_expanded: Vec<bool>,
     pub(super) include_multi_texture: bool,
-}
-
-pub(super) struct FolderGalleryBuild {
-    pub(super) folder_path: std::path::PathBuf,
-    pub(super) include_multi_texture: bool,
-    pub(super) files: Vec<TextureFile>,
-    pub(super) index_map: Vec<(usize, usize)>,
-    pub(super) file_global_ranges: Vec<std::ops::Range<usize>>,
-    pub(super) file_expanded: Vec<bool>,
-}
-
-pub(super) enum FolderLoadResult {
-    Ok(FolderGalleryBuild),
-    Err(String),
+    pub(super) is_folder: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,14 +76,7 @@ pub(super) struct AppState {
     pub(super) tabs: Vec<Tab>,
     pub(super) active_tab_id: Option<usize>,
     pub(super) next_tab_id: usize,
-    pub(super) previews: HashMap<(usize, usize), PreviewState>,
-    preview_load_queue: VecDeque<PreviewRequest>,
-    preview_queued: HashMap<(usize, usize), u64>,
-    preview_in_flight: HashMap<(usize, usize), u64>,
-    preview_generation: HashMap<(usize, usize), u64>,
-    preview_decode_sender: std::sync::mpsc::Sender<PreviewDecodeResult>,
-    preview_decode_receiver: std::sync::mpsc::Receiver<PreviewDecodeResult>,
-    max_preview_jobs: usize,
+    pub(super) previews: PreviewManager,
     pub(super) error_message: Option<String>,
     pub(super) logs: Vec<String>,
     pub(super) show_logs: bool,
@@ -143,8 +106,7 @@ pub(super) struct AppState {
     pub(super) multi_open_shared_view: bool,
     pub(super) multi_open_include_multi_texture: bool,
     pub(super) show_close_dialog: Option<usize>,
-    pub(super) file_load_queue: VecDeque<std::path::PathBuf>,
-    pub(super) folder_load_receiver: Option<std::sync::mpsc::Receiver<FolderLoadResult>>,
+    pub(super) loading: LoadingManager,
     pub(super) previous_active_tab_id: Option<usize>,
     pub(super) ipc_receiver: Option<std::sync::mpsc::Receiver<String>>,
     pub(super) tabs_scroll_offset: f32,
@@ -152,8 +114,6 @@ pub(super) struct AppState {
     pub(super) tooltip_since: Option<Instant>,
     pub(super) frame_tooltip: Option<(egui::Id, &'static str)>,
     pub(super) show_transparency_bg: bool,
-    pub(super) ipc_restore_was_minimized: Option<bool>,
-    pub(super) ipc_restore_was_maximized: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -204,23 +164,11 @@ fn normalize_streamtex_replacement(
 
 impl Default for AppState {
     fn default() -> Self {
-        let (preview_decode_sender, preview_decode_receiver) = std::sync::mpsc::channel();
-        let max_preview_jobs = std::thread::available_parallelism().map_or(3, |parallelism| {
-            parallelism.get().saturating_sub(1).clamp(2, 8)
-        });
-
         Self {
             tabs: Vec::new(),
             active_tab_id: None,
             next_tab_id: 0,
-            previews: HashMap::new(),
-            preview_load_queue: VecDeque::new(),
-            preview_queued: HashMap::new(),
-            preview_in_flight: HashMap::new(),
-            preview_generation: HashMap::new(),
-            preview_decode_sender,
-            preview_decode_receiver,
-            max_preview_jobs,
+            previews: PreviewManager::default(),
             error_message: None,
             logs: Vec::new(),
             show_logs: false,
@@ -250,8 +198,7 @@ impl Default for AppState {
             multi_open_shared_view: false,
             multi_open_include_multi_texture: true,
             show_close_dialog: None,
-            file_load_queue: VecDeque::new(),
-            folder_load_receiver: None,
+            loading: LoadingManager::default(),
             previous_active_tab_id: None,
             ipc_receiver: None,
             tabs_scroll_offset: 0.0,
@@ -259,8 +206,6 @@ impl Default for AppState {
             tooltip_since: None,
             frame_tooltip: None,
             show_transparency_bg: true,
-            ipc_restore_was_minimized: None,
-            ipc_restore_was_maximized: None,
         }
     }
 }
@@ -274,63 +219,9 @@ pub fn create_app(
         ..Default::default()
     };
     if let Some(path) = file_to_open {
-        app_state.file_load_queue.push_back(path);
+        app_state.queue_file_load(path);
     }
     Box::new(app_state)
-}
-
-fn load_texture_file_with_fallback(
-    path: &std::path::PathBuf,
-) -> Result<(TextureFile, &'static str), (&'static str, String, &'static str, String)> {
-    let magic_bytes: Option<[u8; 4]> = std::fs::File::open(path)
-        .and_then(|mut f| {
-            let mut buf = [0u8; 4];
-            f.read_exact(&mut buf)?;
-            Ok(buf)
-        })
-        .ok();
-
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let guess_textures = matches!(magic_bytes, Some([0x53, 0x58, 0x45, 0x54])) || ext == "textures";
-    let (primary_name, secondary_name) = if guess_textures {
-        ("textures", "streamtex")
-    } else if ext == "streamtex" {
-        ("streamtex", "textures")
-    } else {
-        ("textures", "streamtex")
-    };
-
-    let primary_result = if primary_name == "textures" {
-        load_textures_file(path.clone())
-    } else {
-        load_streamtex_file(path.clone())
-    };
-
-    match primary_result {
-        Ok(file) => Ok((file, primary_name)),
-        Err(err1) => {
-            let secondary_result = if secondary_name == "textures" {
-                load_textures_file(path.clone())
-            } else {
-                load_streamtex_file(path.clone())
-            };
-
-            match secondary_result {
-                Ok(file) => Ok((file, secondary_name)),
-                Err(err2) => Err((
-                    primary_name,
-                    err1.to_string(),
-                    secondary_name,
-                    err2.to_string(),
-                )),
-            }
-        }
-    }
 }
 
 fn normalize_batch_name(name: &str) -> String {
@@ -412,17 +303,6 @@ impl BatchReplaceEntry {
 }
 
 impl AppState {
-    fn preview_key(tab_id: usize, index: usize) -> (usize, usize) {
-        (tab_id, index)
-    }
-
-    fn preview_generation_for(&self, tab_id: usize, index: usize) -> u64 {
-        self.preview_generation
-            .get(&Self::preview_key(tab_id, index))
-            .copied()
-            .unwrap_or(0)
-    }
-
     pub(super) fn tab_by_id(&self, id: usize) -> Option<&Tab> {
         self.tabs.iter().find(|t| t.id == id)
     }
@@ -635,11 +515,22 @@ impl AppState {
     }
 
     pub(super) fn log(&mut self, message: &str) {
-        use chrono::Local;
-        let timestamp = Local::now().format("%H:%M:%S").to_string();
+        let timestamp = crate::runtime::log_timestamp();
         self.logs.push(format!("[{timestamp}] {message}"));
         if self.logs.len() > 500 {
             self.logs.remove(0);
+        }
+    }
+
+    fn report_error(&mut self, message: String) {
+        self.log(&message);
+        if let Some(existing) = &mut self.error_message {
+            if *existing != message {
+                existing.push_str("\n\n");
+                existing.push_str(&message);
+            }
+        } else {
+            self.error_message = Some(message);
         }
     }
 
@@ -736,6 +627,7 @@ impl AppState {
         original: &DdsInfo,
         prepared: PreparedReplacement,
     ) -> Option<(String, Option<String>)> {
+        Self::dds_by_index(tab, index)?;
         let PreparedReplacement {
             bytes,
             width,
@@ -755,7 +647,54 @@ impl AppState {
         dds_info.height = height;
         dds_info.mipmap_count = mipmap_count;
         dds_info.pixel_format = pixel_format;
-        Some((dds_info.name.clone(), note))
+        dds_info.modified = true;
+        let name = dds_info.name.clone();
+        tab.has_unsaved_changes = true;
+        Some((name, note))
+    }
+
+    pub(super) fn replace_from_path(
+        &mut self,
+        tab_id: usize,
+        index: usize,
+        path: &std::path::Path,
+    ) {
+        let Some((original, file_type)) = self.tab_by_id(tab_id).and_then(|tab| {
+            Some((
+                Self::dds_by_index(tab, index)?.clone(),
+                Self::file_type_by_index_cloned(tab, index)?,
+            ))
+        }) else {
+            self.report_error("The replacement target is no longer available.".to_string());
+            return;
+        };
+        let prepared = crate::runtime::run_guarded(|| {
+            let bytes = fs::read(path)
+                .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+            Self::prepare_replacement_dds(
+                &file_type,
+                &original,
+                &bytes,
+                self.patch_header_on_replace,
+                self.streamtex_allow_resize,
+                self.resize_on_replace,
+            )
+        });
+        match prepared {
+            Ok(prepared) => {
+                let replacement = self.tab_mut_by_id(tab_id).and_then(|tab| {
+                    Self::apply_prepared_replacement_to_index(tab, index, &original, prepared)
+                });
+                if let Some((name, note)) = replacement {
+                    self.invalidate_preview(tab_id, index);
+                    if let Some(note) = note {
+                        self.log(&note);
+                    }
+                    self.log(&format!("Replaced texture: {name}"));
+                }
+            }
+            Err(error) => self.report_error(error),
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -839,8 +778,7 @@ impl AppState {
                     }
                 }
                 BatchReplaceRule::Index => {
-                    let maybe_key =
-                        batch_index_key(file_name).map(|value| value.to_string());
+                    let maybe_key = batch_index_key(file_name).map(|value| value.to_string());
                     let Some(key) = maybe_key else {
                         continue;
                     };
@@ -871,15 +809,13 @@ impl AppState {
             // duplicate texture names stay unambiguous: a file exported as
             // "name_<index>.dds" only ever replaces the entry with that index.
             let candidates: Vec<std::path::PathBuf> = match self.batch_replace_rule {
-                BatchReplaceRule::ExactName => hinted_paths
-                    .get(&index)
-                    .map_or_else(Vec::new, Clone::clone),
+                BatchReplaceRule::ExactName => {
+                    hinted_paths.get(&index).map_or_else(Vec::new, Clone::clone)
+                }
                 BatchReplaceRule::Index => Vec::new(),
             };
             let candidates = if candidates.is_empty() {
-                grouped_paths
-                    .get(&key)
-                    .map_or_else(Vec::new, Clone::clone)
+                grouped_paths.get(&key).map_or_else(Vec::new, Clone::clone)
             } else {
                 candidates
             };
@@ -1082,136 +1018,51 @@ impl AppState {
     }
 
     pub(super) fn invalidate_preview(&mut self, tab_id: usize, index: usize) {
-        let key = Self::preview_key(tab_id, index);
-        self.previews.remove(&key);
-        self.preview_queued.remove(&key);
-        self.preview_in_flight.remove(&key);
-        let generation = self.preview_generation.entry(key).or_insert(0);
-        *generation = generation.saturating_add(1);
+        self.previews.invalidate(tab_id, index);
+    }
+
+    pub(super) fn clear_tab_previews(&mut self, tab_id: usize) {
+        self.previews.clear_tab(tab_id);
     }
 
     pub(super) fn enqueue_preview_load(&mut self, tab_id: usize, index: usize) {
-        let key = Self::preview_key(tab_id, index);
-        if self.previews.contains_key(&key) {
-            return;
-        }
-        let generation = self.preview_generation_for(tab_id, index);
-        if self.preview_queued.get(&key) == Some(&generation)
-            || self.preview_in_flight.get(&key) == Some(&generation)
+        if let Some(bytes) = self
+            .tab_by_id(tab_id)
+            .and_then(|tab| Self::dds_by_index(tab, index))
+            .map(|dds| dds.bytes.clone())
         {
-            return;
+            self.previews.request_thumbnail(tab_id, index, bytes);
         }
-        self.preview_load_queue.push_back(PreviewRequest {
-            tab_id,
-            index,
-            generation,
-        });
-        self.preview_queued.insert(key, generation);
+    }
+
+    pub(super) fn enqueue_full_preview_load(&mut self, tab_id: usize, index: usize) {
+        if let Some(bytes) = self
+            .tab_by_id(tab_id)
+            .and_then(|tab| Self::dds_by_index(tab, index))
+            .map(|dds| dds.bytes.clone())
+        {
+            self.previews.request_full(tab_id, index, bytes);
+        }
     }
 
     pub(super) fn process_preview_results(&mut self, ctx: &egui::Context) {
-        let mut applied = 0usize;
-
-        while applied < 16 {
-            let result = match self.preview_decode_receiver.try_recv() {
-                Ok(result) => result,
-                Err(
-                    std::sync::mpsc::TryRecvError::Empty
-                    | std::sync::mpsc::TryRecvError::Disconnected,
-                ) => break,
-            };
-
-            let key = Self::preview_key(result.tab_id, result.index);
-            if self.preview_in_flight.get(&key) != Some(&result.generation) {
-                continue;
-            }
-
-            self.preview_in_flight.remove(&key);
-
-            if self.preview_generation_for(result.tab_id, result.index) != result.generation {
-                continue;
-            }
-            if self
-                .tab_by_id(result.tab_id)
-                .and_then(|tab| Self::dds_by_index(tab, result.index))
-                .is_none()
-            {
-                continue;
-            }
-
-            let preview_state = match result.decoded {
-                Some((size, pixels)) => {
-                    super::preview::upload_decoded_preview(
-                        ctx,
-                        &result.texture_name,
-                        size,
-                        &pixels,
-                    )
-                }
-                None => PreviewState::Unsupported,
-            };
-            self.previews.insert(key, preview_state);
-            applied += 1;
-        }
-
-        if applied > 0 {
-            ctx.request_repaint();
+        for error in self.previews.process_results(ctx) {
+            self.log(&error);
         }
     }
 
     pub(super) fn dispatch_preview_jobs(&mut self, ctx: &egui::Context) {
-        while self.preview_in_flight.len() < self.max_preview_jobs {
-            let Some(request) = self.preview_load_queue.pop_front() else {
-                break;
-            };
-            let key = Self::preview_key(request.tab_id, request.index);
+        self.previews.dispatch_jobs(ctx);
+    }
 
-            if self.preview_queued.get(&key) != Some(&request.generation) {
-                continue;
-            }
-            self.preview_queued.remove(&key);
-
-            if self.preview_generation_for(request.tab_id, request.index) != request.generation {
-                continue;
-            }
-
-            let Some(tab) = self.tab_by_id(request.tab_id) else {
-                continue;
-            };
-            let Some(dds) = Self::dds_by_index(tab, request.index) else {
-                continue;
-            };
-
-            let texture_name = format!(
-                "preview::{}::{}::{}",
-                request.tab_id, request.index, dds.name
-            );
-            let dds_name = dds.name.clone();
-            let dds_bytes = dds.bytes.clone();
-            let sender = self.preview_decode_sender.clone();
-            let repaint_ctx = ctx.clone();
-
-            self.preview_in_flight.insert(key, request.generation);
-
-            std::thread::spawn(move || {
-                let decoded = match super::preview::decode_dds_preview_image(dds_bytes.as_ref()) {
-                    Ok(decoded) => Some(decoded),
-                    Err(reason) => {
-                        eprintln!("Failed to load DDS preview for {dds_name}: {reason}");
-                        None
-                    }
-                };
-
-                let _ = sender.send(PreviewDecodeResult {
-                    tab_id: request.tab_id,
-                    index: request.index,
-                    generation: request.generation,
-                    texture_name,
-                    decoded,
-                });
-                repaint_ctx.request_repaint();
-            });
+    pub(super) fn active_full_preview_key(&self) -> Option<(usize, usize)> {
+        if self.show_logs || self.show_about || self.show_tweaks {
+            return None;
         }
+        let tab = self.active_tab().filter(|tab| tab.show_full_preview)?;
+        let index = tab.selected_index?;
+        Self::dds_by_index(tab, index)?;
+        Some((tab.id, index))
     }
 
     pub(super) const fn offer_tooltip(&mut self, id: egui::Id, text: &'static str) {
@@ -1251,95 +1102,73 @@ impl AppState {
         }
     }
 
-    pub(super) fn build_folder_gallery(
-        folder_path: std::path::PathBuf,
-        include_multi_texture: bool,
-    ) -> FolderLoadResult {
-        let mut paths: Vec<std::path::PathBuf> = match fs::read_dir(&folder_path) {
-            Ok(read_dir) => read_dir.filter_map(|e| e.ok().map(|e| e.path())).collect(),
-            Err(err) => return FolderLoadResult::Err(err.to_string()),
-        };
+    fn sync_loaded_paths(&mut self) {
+        self.loading.set_loaded_paths(
+            self.tabs
+                .iter()
+                .filter(|tab| tab.folder_gallery.is_none())
+                .map(|tab| tab.file.path.clone()),
+        );
+    }
 
-        paths.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    fn enqueue_load(&mut self, request: LoadRequest) {
+        self.sync_loaded_paths();
+        if let Err(error) = self.loading.enqueue(request) {
+            self.report_error(error);
+        }
+    }
 
-        let mut gallery_files: Vec<TextureFile> = Vec::new();
-        let mut index_map: Vec<(usize, usize)> = Vec::new();
-        let mut file_global_ranges: Vec<std::ops::Range<usize>> = Vec::new();
-        let mut file_expanded: Vec<bool> = Vec::new();
+    pub(super) fn queue_file_load(&mut self, path: std::path::PathBuf) {
+        if self.loading.pending_count() == 0 && self.activate_loaded_file(&path) {
+            return;
+        }
+        self.enqueue_load(LoadRequest::File(path));
+    }
 
-        for path in paths {
-            let Some(ext) = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(str::to_ascii_lowercase)
-            else {
-                continue;
-            };
-            if ext != "textures" && ext != "streamtex" {
-                continue;
-            }
+    pub(super) fn process_load_results(&mut self, ctx: &egui::Context) {
+        let results = self.loading.process_results();
+        if !results.is_empty() {
+            ctx.request_repaint();
+        }
+        for result in results {
+            self.integrate_load_result(result);
+        }
+        if self.loading.pending_count() > 0 {
+            self.sync_loaded_paths();
+        }
+    }
 
-            let result = if ext == "textures" {
-                load_textures_file(path.clone())
-            } else {
-                load_streamtex_file(path.clone())
-            };
-
-            let Ok(mut file) = result else { continue };
-            if file.dds_list.is_empty() {
-                continue;
-            }
-            if !include_multi_texture && file.dds_list.len() != 1 {
-                continue;
-            }
-
-            let file_idx = gallery_files.len();
-            let textures_in_file = file.dds_list.len();
-            let global_start = index_map.len();
-
-            for (local_idx, dds) in file.dds_list.iter_mut().enumerate() {
-                if dds.name.trim().is_empty() {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if textures_in_file == 1 {
-                            dds.name = format!("{stem}.dds");
-                        } else {
-                            dds.name = format!("{stem}_{local_idx}.dds");
-                        }
-                    }
+    fn integrate_load_result(&mut self, result: Result<LoadedContent, String>) {
+        match result {
+            Ok(LoadedContent::File(file)) => self.load_file(file),
+            Ok(LoadedContent::ExistingFile(path)) => {
+                if !self.activate_loaded_file(&path) {
+                    self.loading.retry_file(path);
                 }
-
-                index_map.push((file_idx, local_idx));
             }
-
-            let global_end = index_map.len();
-            file_global_ranges.push(global_start..global_end);
-            file_expanded.push(true);
-            gallery_files.push(file);
+            Ok(LoadedContent::Gallery(build)) => self.load_gallery(build),
+            Err(error) => self.report_error(error),
         }
+    }
 
-        if index_map.is_empty() {
-            if include_multi_texture {
-                return FolderLoadResult::Err(
-                    "No supported .textures/.streamtex files found in this folder.".to_string(),
-                );
-            }
-            return FolderLoadResult::Err(
-                "No supported single-texture .textures/.streamtex files found in this folder."
-                    .to_string(),
-            );
+    fn activate_loaded_file(&mut self, path: &std::path::Path) -> bool {
+        if let Some(existing_tab) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.folder_gallery.is_none() && tab.file.path == path)
+        {
+            self.active_tab_id = Some(existing_tab.id);
+            self.log("This file is already loaded.");
+            true
+        } else {
+            false
         }
-
-        FolderLoadResult::Ok(FolderGalleryBuild {
-            folder_path,
-            include_multi_texture,
-            files: gallery_files,
-            index_map,
-            file_global_ranges,
-            file_expanded,
-        })
     }
 
     pub(super) fn load_file(&mut self, file: TextureFile) {
+        if self.activate_loaded_file(&file.path) {
+            return;
+        }
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
 
@@ -1364,7 +1193,6 @@ impl AppState {
             self.enqueue_preview_load(tab_id, 0);
         }
         self.log(&format!("Loaded file with {dds_count} textures!"));
-        self.error_message = None;
     }
 
     pub(super) fn load_folder_gallery(
@@ -1372,15 +1200,9 @@ impl AppState {
         folder_path: std::path::PathBuf,
         include_multi_texture: bool,
     ) {
-        let (tx, rx) = std::sync::mpsc::channel::<FolderLoadResult>();
-        self.folder_load_receiver = Some(rx);
-
-        self.error_message = None;
-        self.log("Loading folder gallery...");
-
-        std::thread::spawn(move || {
-            let result = Self::build_folder_gallery(folder_path, include_multi_texture);
-            let _ = tx.send(result);
+        self.enqueue_load(LoadRequest::Folder {
+            path: folder_path,
+            include_multi_texture,
         });
     }
 
@@ -1389,113 +1211,69 @@ impl AppState {
         paths: Vec<std::path::PathBuf>,
         include_multi_texture: bool,
     ) {
-        let mut gallery_files: Vec<TextureFile> = Vec::new();
-        let mut index_map: Vec<(usize, usize)> = Vec::new();
-        let mut file_global_ranges: Vec<std::ops::Range<usize>> = Vec::new();
-        let mut file_expanded: Vec<bool> = Vec::new();
+        self.enqueue_load(LoadRequest::Shared {
+            paths,
+            include_multi_texture,
+        });
+    }
 
-        let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
-
-        for path in paths {
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            if path.is_dir() {
-                continue;
-            }
-
-            let file = match load_texture_file_with_fallback(&path) {
-                Ok((file, _)) => file,
-                Err((primary_name, err1, secondary_name, err2)) => {
-                    self.log(&format!(
-                        "Failed to load dropped file {} (as {}: {}; as {}: {})",
-                        path.display(),
-                        primary_name,
-                        err1,
-                        secondary_name,
-                        err2
-                    ));
-                    continue;
-                }
-            };
-
-            let mut file = file;
-            if file.dds_list.is_empty() {
-                continue;
-            }
-            if !include_multi_texture && file.dds_list.len() != 1 {
-                continue;
-            }
-
-            let file_idx = gallery_files.len();
-            let textures_in_file = file.dds_list.len();
-            let global_start = index_map.len();
-
-            for (local_idx, dds) in file.dds_list.iter_mut().enumerate() {
-                if dds.name.trim().is_empty() {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if textures_in_file == 1 {
-                            dds.name = format!("{stem}.dds");
-                        } else {
-                            dds.name = format!("{stem}_{local_idx}.dds");
-                        }
-                    }
-                }
-
-                index_map.push((file_idx, local_idx));
-            }
-
-            let global_end = index_map.len();
-            file_global_ranges.push(global_start..global_end);
-            file_expanded.push(true);
-            gallery_files.push(file);
-        }
-
-        if index_map.is_empty() {
-            if include_multi_texture {
-                self.error_message =
-                    Some("No supported .textures/.streamtex files found.".to_string());
-            } else {
-                self.error_message = Some(
-                    "No supported single-texture .textures/.streamtex files found.".to_string(),
-                );
-            }
-            return;
-        }
-
+    fn load_gallery(&mut self, build: GalleryBuild) {
+        let GalleryBuild {
+            path,
+            is_folder,
+            include_multi_texture,
+            files,
+            index_map,
+            file_global_ranges,
+            file_expanded,
+            warnings,
+        } = build;
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
-
+        let selected_index = (!index_map.is_empty()).then_some(0);
         let file = TextureFile {
-            file_type: texembed::FileType::Textures,
-            path: std::path::PathBuf::from(format!("Shared view ({})", gallery_files.len())),
+            file_type: FileType::Textures,
+            path,
             dds_list: Vec::new(),
             original_bytes: Vec::new(),
+            streamtex_layout: None,
         };
 
         let tab = Tab {
             id: tab_id,
             file,
-            selected_index: Some(0),
+            selected_index,
             has_unsaved_changes: false,
             show_full_preview: false,
             full_preview_zoom: 1.0,
             full_preview_pan: Vec2::ZERO,
             replace_backups: HashMap::new(),
             folder_gallery: Some(FolderGallery {
-                files: gallery_files,
+                files,
                 index_map,
                 file_global_ranges,
                 file_expanded,
                 include_multi_texture,
+                is_folder,
             }),
         };
 
         self.tabs.push(tab);
         self.active_tab_id = Some(tab_id);
-        self.enqueue_preview_load(tab_id, 0);
-        self.log("Loaded shared gallery!");
-        self.error_message = None;
+        if let Some(index) = selected_index {
+            self.enqueue_preview_load(tab_id, index);
+        }
+        self.log(if is_folder {
+            "Loaded folder gallery!"
+        } else {
+            "Loaded shared gallery!"
+        });
+        if !warnings.is_empty() {
+            self.report_error(format!(
+                "Some gallery files could not be loaded:\n{}",
+                warnings.join("\n")
+            ));
+        }
     }
 
     pub(super) fn close_tab(&mut self, tab_id: usize) {
@@ -1511,15 +1289,7 @@ impl AppState {
     pub(super) fn force_close_tab(&mut self, tab_id: usize) {
         let pos = self.tabs.iter().position(|t| t.id == tab_id);
         self.tabs.retain(|t| t.id != tab_id);
-        self.previews.retain(|(id, _), _| *id != tab_id);
-        self.preview_queued.retain(|(id, _), _| *id != tab_id);
-        self.preview_in_flight.retain(|(id, _), _| *id != tab_id);
-        self.preview_generation.retain(|(id, _), _| *id != tab_id);
-        self.preview_load_queue = self
-            .preview_load_queue
-            .drain(..)
-            .filter(|request| request.tab_id != tab_id)
-            .collect();
+        self.clear_tab_previews(tab_id);
         if self.active_tab_id == Some(tab_id) {
             if let Some(pos) = pos {
                 if self.tabs.is_empty() {
@@ -1548,34 +1318,7 @@ impl AppState {
             .pick_files()
         {
             for path in paths {
-                self.file_load_queue.push_back(path);
-            }
-        }
-    }
-
-    pub(super) fn try_load_path(&mut self, path: &std::path::PathBuf) {
-        if let Some(existing_tab) = self.tabs.iter().find(|t| &t.file.path == path) {
-            self.active_tab_id = Some(existing_tab.id);
-            self.log("This file is already loaded.");
-            self.error_message = Some("This file is already loaded.".to_string());
-            return;
-        }
-
-        self.log(&format!("Attempting to open: {}", path.display()));
-
-        match load_texture_file_with_fallback(path) {
-            Ok((file, file_type_name)) => {
-                self.log(&format!("Loaded as {file_type_name} file!"));
-                self.load_file(file);
-            }
-            Err((primary_name, err1, secondary_name, err2)) => {
-                self.log(&format!(
-                    "Failed to load file! Primary error (as {primary_name}): {err1}"
-                ));
-                self.log(&format!("Secondary error (as {secondary_name}): {err2}"));
-                self.error_message = Some(format!(
-                    "Failed to open file!\nPrimary error as {primary_name}:\n{err1}\n\nSecondary error as {secondary_name}:\n{err2}"
-                ));
+                self.queue_file_load(path);
             }
         }
     }
@@ -1588,75 +1331,38 @@ impl AppState {
 
         let (result, sidecar_logs) = {
             let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
-                // This should not happen, but we handle it just in case.
                 self.log("Error: Could not find active tab during save.");
                 return;
             };
             let patch_sidecar = self.streamtex_patch_sidecar;
-            let mut sidecar_logs: Vec<String> = Vec::new();
-
-            let mut patch_streamtex_after_save = |file: &TextureFile| {
-                if !patch_sidecar {
-                    return;
-                }
-                let sidecar = file.path.with_extension("textures");
-                if !sidecar.is_file() {
-                    return;
-                }
-                match patch_streamtex_sidecar(&sidecar, &file.dds_list) {
-                    Ok(()) => sidecar_logs.push(format!(
-                        "Patched paired .textures offsets: {}",
-                        sidecar.display()
-                    )),
-                    Err(err) => sidecar_logs.push(format!(
-                        "Sidecar patch failed for {}: {err}",
-                        sidecar.display()
-                    )),
-                }
-            };
-
-            if let Some(gallery) = &tab.folder_gallery {
-                let mut changed_files: HashSet<usize> = HashSet::new();
-                for idx in tab.replace_backups.keys().copied() {
-                    if let Some((file_idx, _)) = gallery.index_map.get(idx).copied() {
-                        changed_files.insert(file_idx);
+            let mut sidecar_logs = Vec::new();
+            let result = crate::runtime::run_guarded(|| {
+                if let Some(gallery) = &tab.folder_gallery {
+                    let mut changed_files = Vec::new();
+                    for index in tab.replace_backups.keys() {
+                        let (file_index, _) = gallery.index_map.get(*index).ok_or_else(|| {
+                            format!("Cannot save missing gallery texture {index}.")
+                        })?;
+                        changed_files.push(*file_index);
                     }
-                }
-
-                let mut result = Ok(());
-                for file_idx in changed_files {
-                    let Some(file) = gallery.files.get(file_idx) else {
-                        continue;
-                    };
-                    let r = match file.file_type {
-                        texembed::FileType::Textures => save_textures_file(file, &file.path),
-                        texembed::FileType::Streamtex => {
-                            let r = save_streamtex_file(file, &file.path);
-                            if r.is_ok() {
-                                patch_streamtex_after_save(file);
-                            }
-                            r
+                    changed_files.sort_unstable();
+                    changed_files.dedup();
+                    for file_index in changed_files {
+                        let file = gallery.files.get(file_index).ok_or_else(|| {
+                            format!("Cannot save missing gallery file {file_index}.")
+                        })?;
+                        if let Some(message) = Self::save_file_with_sidecar(file, patch_sidecar)? {
+                            sidecar_logs.push(message);
                         }
-                    };
-                    if let Err(err) = r {
-                        result = Err(err);
-                        break;
                     }
+                } else if let Some(message) =
+                    Self::save_file_with_sidecar(&tab.file, patch_sidecar)?
+                {
+                    sidecar_logs.push(message);
                 }
-                (result, sidecar_logs)
-            } else {
-                let result = match &tab.file.file_type {
-                    texembed::FileType::Textures => save_textures_file(&tab.file, &tab.file.path),
-                    texembed::FileType::Streamtex => {
-                        let r = save_streamtex_file(&tab.file, &tab.file.path);
-                        if r.is_ok() {
-                            patch_streamtex_after_save(&tab.file);
-                        }
-                        r
-                    }
-                };
-                (result, sidecar_logs)
-            }
+                Ok(())
+            });
+            (result, sidecar_logs)
         };
 
         for message in &sidecar_logs {
@@ -1665,17 +1371,41 @@ impl AppState {
 
         match result {
             Ok(()) => {
-                if let Some(tab) = self.active_tab_mut() {
+                if let Some(tab) = self.tab_mut_by_id(tab_id) {
                     tab.has_unsaved_changes = false;
                     tab.replace_backups.clear();
                     self.log("Saved changes successfully!");
                 }
             }
             Err(err) => {
-                self.error_message = Some(err.to_string());
-                self.log(&format!("Error saving: {err}"));
+                self.report_error(format!("Error saving: {err}"));
             }
         }
+    }
+
+    fn save_file_with_sidecar(
+        file: &TextureFile,
+        patch_sidecar: bool,
+    ) -> Result<Option<String>, String> {
+        if patch_sidecar && matches!(file.file_type, FileType::Streamtex) {
+            let sidecar = file.path.with_extension("textures");
+            save_streamtex_with_sidecar(file, &file.path, &sidecar).map_err(|error| {
+                format!(
+                    "Could not save stream and sidecar {}: {error}",
+                    sidecar.display()
+                )
+            })?;
+            return Ok(Some(format!(
+                "Saved paired .textures offsets: {}",
+                sidecar.display()
+            )));
+        }
+        match file.file_type {
+            FileType::Textures => save_textures_file(file, &file.path),
+            FileType::Streamtex => save_streamtex_file(file, &file.path),
+        }
+        .map_err(|error| format!("{}: {error}", file.path.display()))?;
+        Ok(None)
     }
 
     pub(super) fn undo_selected_replace(&mut self) {
@@ -1686,12 +1416,12 @@ impl AppState {
         let Some(index) = tab.selected_index else {
             return;
         };
+        if Self::dds_by_index(tab, index).is_none() {
+            return;
+        }
         let Some(backup) = tab.replace_backups.remove(&index) else {
             return;
         };
-        if index >= Self::total_textures_in_tab(tab) {
-            return;
-        }
 
         let name = backup.name.clone();
         if let Some(entry) = Self::dds_by_index_mut(tab, index) {
@@ -1838,80 +1568,30 @@ impl AppState {
     }
 
     pub(super) fn replace_selected(&mut self) {
-        let tab_id = self.active_tab_id;
-        let Some((selected_index, dds, file_type)) = self.active_tab().and_then(|tab| {
+        let Some((tab_id, selected_index, name)) = self.active_tab().and_then(|tab| {
             let index = tab.selected_index?;
-            let dds = Self::dds_by_index(tab, index)?.clone();
-            let file_type = Self::file_type_by_index_cloned(tab, index)?;
-            Some((index, dds, file_type))
+            let dds = Self::dds_by_index(tab, index)?;
+            Some((tab.id, index, dds.name.clone()))
         }) else {
             return;
         };
 
         if let Some(file) = FileDialog::new()
-            .set_file_name(&dds.name)
+            .set_file_name(&name)
             .add_filter("DDS File", &["dds"])
             .pick_file()
         {
-            match fs::read(&file) {
-                Ok(new_dds_bytes) => {
-                    match Self::prepare_replacement_dds(
-                        &file_type,
-                        &dds,
-                        &new_dds_bytes,
-                        self.patch_header_on_replace,
-                        self.streamtex_allow_resize,
-                        self.resize_on_replace,
-                    ) {
-                        Ok(prepared) => {
-                            let PreparedReplacement {
-                                bytes,
-                                width,
-                                height,
-                                mipmap_count,
-                                pixel_format,
-                                note,
-                            } = prepared;
-                            let mut replaced_name = None;
-                            if let Some(tab) = self.active_tab_mut() {
-                                tab.replace_backups
-                                    .entry(selected_index)
-                                    .or_insert_with(|| dds.clone());
-                                if let Some(dds_info) = Self::dds_by_index_mut(tab, selected_index)
-                                {
-                                    dds_info.bytes = bytes.into();
-                                    dds_info.width = width;
-                                    dds_info.height = height;
-                                    dds_info.mipmap_count = mipmap_count;
-                                    dds_info.pixel_format = pixel_format;
-                                    replaced_name = Some(dds_info.name.clone());
-                                }
-
-                                tab.has_unsaved_changes = true;
-                            }
-                            if let Some(id) = tab_id {
-                                self.invalidate_preview(id, selected_index);
-                            }
-                            if let Some(note) = note {
-                                self.log(&note);
-                            }
-                            if let Some(name) = replaced_name {
-                                self.log(&format!("Replaced texture: {name}"));
-                            }
-                        }
-                        Err(err) => {
-                            self.error_message = Some(err);
-                        }
-                    }
-                }
-                Err(err) => self.error_message = Some(err.to_string()),
-            }
+            self.replace_from_path(tab_id, selected_index, &file);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
     use super::*;
 
     #[test]
@@ -1943,6 +1623,8 @@ mod tests {
     fn make_argb_dds(width: u32, height: u32, mips: u32) -> Vec<u8> {
         let mut b = vec![0_u8; 128];
         b[0..4].copy_from_slice(b"DDS ");
+        b[4..8].copy_from_slice(&124_u32.to_le_bytes());
+        b[8..12].copy_from_slice(&0x0000_100F_u32.to_le_bytes());
         b[12..16].copy_from_slice(&height.to_le_bytes());
         b[16..20].copy_from_slice(&width.to_le_bytes());
         b[20..24].copy_from_slice(&(width * 4).to_le_bytes());
@@ -1955,6 +1637,7 @@ mod tests {
         b[96..100].copy_from_slice(&0x0000_FF00_u32.to_le_bytes());
         b[100..104].copy_from_slice(&0x0000_00FF_u32.to_le_bytes());
         b[104..108].copy_from_slice(&0xFF00_0000_u32.to_le_bytes());
+        b[108..112].copy_from_slice(&0x1000_u32.to_le_bytes());
         b.resize(128 + (width as usize) * (height as usize) * 4 + 4096, 0xAA);
         b
     }
@@ -1962,10 +1645,16 @@ mod tests {
     fn make_dxt1_dds(width: u32, height: u32, mips: u32) -> Vec<u8> {
         let mut b = vec![0_u8; 128];
         b[0..4].copy_from_slice(b"DDS ");
+        b[4..8].copy_from_slice(&124_u32.to_le_bytes());
+        b[8..12].copy_from_slice(&0x0008_1007_u32.to_le_bytes());
         b[12..16].copy_from_slice(&height.to_le_bytes());
         b[16..20].copy_from_slice(&width.to_le_bytes());
+        b[20..24].copy_from_slice(&(width.div_ceil(4) * height.div_ceil(4) * 8).to_le_bytes());
         b[28..32].copy_from_slice(&mips.to_le_bytes());
+        b[76..80].copy_from_slice(&32_u32.to_le_bytes());
+        b[80..84].copy_from_slice(&4_u32.to_le_bytes());
         b[84..88].copy_from_slice(b"DXT1");
+        b[108..112].copy_from_slice(&0x1000_u32.to_le_bytes());
         b.resize(128 + (width as usize) * (height as usize) / 2 + 1024, 0xBB);
         b
     }
@@ -1980,7 +1669,576 @@ mod tests {
             pixel_format: u32::from_le_bytes(*b"DXT1"),
             catalog_index: 0,
             entry_index: 0,
+            modified: false,
         }
+    }
+
+    struct TempFolder(PathBuf);
+
+    impl TempFolder {
+        fn new() -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "texembed_ui_test_{}_{}_{}",
+                std::process::id(),
+                stamp,
+                id
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_file(path: &str, count: usize) -> TextureFile {
+        TextureFile {
+            file_type: FileType::Textures,
+            path: PathBuf::from(path),
+            dds_list: (0..count)
+                .map(|index| DdsInfo {
+                    entry_index: index,
+                    ..orig_dds_info()
+                })
+                .collect(),
+            original_bytes: b"load-time snapshot".to_vec(),
+            streamtex_layout: None,
+        }
+    }
+
+    fn prepared_for(original: &DdsInfo) -> PreparedReplacement {
+        let mut bytes = original.bytes.to_vec();
+        bytes[128] ^= 0xFF;
+        PreparedReplacement {
+            bytes,
+            width: original.width,
+            height: original.height,
+            mipmap_count: original.mipmap_count,
+            pixel_format: original.pixel_format,
+            note: None,
+        }
+    }
+
+    fn stream_fixture(path: &Path) -> TextureFile {
+        let mut dds = make_dxt1_dds(8, 8, 1);
+        dds.truncate(160);
+        dds[4..8].copy_from_slice(&124_u32.to_le_bytes());
+        dds[8..12].copy_from_slice(&0x0008_1007_u32.to_le_bytes());
+        dds[20..24].copy_from_slice(&32_u32.to_le_bytes());
+        dds[76..80].copy_from_slice(&32_u32.to_le_bytes());
+        dds[80..84].copy_from_slice(&4_u32.to_le_bytes());
+        dds[108..112].copy_from_slice(&0x1000_u32.to_le_bytes());
+        let mut bytes = 160_u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&dds);
+        fs::write(path, bytes).unwrap();
+        texembed::load_streamtex_file(path.to_path_buf()).unwrap()
+    }
+
+    fn finish_loading(state: &mut AppState) {
+        let ctx = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state.loading.pending_count() > 0 {
+            state.loading.dispatch_jobs(&ctx);
+            state.process_load_results(&ctx);
+            assert!(Instant::now() < deadline, "UI loading did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn queued_load_results(state: &mut AppState) -> Vec<Result<LoadedContent, String>> {
+        let ctx = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            state.loading.dispatch_jobs(&ctx);
+            let results = state.loading.process_results();
+            if !results.is_empty() {
+                return results;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "UI loading worker did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn file_alias(path: &Path) -> PathBuf {
+        let directory = path.parent().unwrap().join("alias");
+        fs::create_dir(&directory).unwrap();
+        directory.join("..").join(path.file_name().unwrap())
+    }
+
+    #[test]
+    fn opening_requests_are_deferred_and_do_not_replace_earlier_requests() {
+        let mut state = AppState::default();
+        state.queue_file_load(PathBuf::from("missing.streamtex"));
+        state.load_folder_gallery(PathBuf::from("missing-folder"), false);
+        state.load_multi_file_gallery(vec![PathBuf::from("also-missing.textures")], true);
+        state.process_load_results(&egui::Context::default());
+        assert_eq!(state.loading.pending_count(), 3);
+        assert!(state.tabs.is_empty());
+        assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn worker_results_integrate_in_request_order_and_activate_duplicates() {
+        let folder = TempFolder::new();
+        let first = folder.0.join("first.streamtex");
+        let second = folder.0.join("second.streamtex");
+        stream_fixture(&first);
+        stream_fixture(&second);
+        let mut state = AppState::default();
+        for path in [
+            first.clone(),
+            second.clone(),
+            folder.0.join(".").join("first.streamtex"),
+        ] {
+            state.queue_file_load(path);
+        }
+        finish_loading(&mut state);
+        assert_eq!(state.tabs.len(), 2);
+        assert_eq!(state.tabs[0].file.path, fs::canonicalize(first).unwrap());
+        assert_eq!(state.tabs[1].file.path, fs::canonicalize(second).unwrap());
+        assert_eq!(state.active_tab_id, Some(state.tabs[0].id));
+        assert_eq!(state.tabs[0].selected_index, Some(0));
+        assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn reopening_invalidated_exact_path_activates_without_io_and_preserves_edits() {
+        let folder = TempFolder::new();
+        let path = folder.0.join("open.streamtex");
+        stream_fixture(&path);
+        let mut state = AppState::default();
+        state.queue_file_load(path.clone());
+        finish_loading(&mut state);
+        let target = state.active_tab_id.unwrap();
+        let canonical = state.active_tab().unwrap().file.path.clone();
+        let original = state.active_tab().unwrap().file.dds_list[0].clone();
+        AppState::apply_prepared_replacement_to_index(
+            state.active_tab_mut().unwrap(),
+            0,
+            &original,
+            prepared_for(&original),
+        )
+        .unwrap();
+        let edited = state.active_tab().unwrap().file.dds_list[0].bytes.clone();
+        state.load_file(test_file("other.textures", 0));
+        fs::write(&path, b"TEXS").unwrap();
+        state.queue_file_load(canonical.clone());
+        assert_eq!(state.loading.pending_count(), 0);
+        assert_eq!(state.active_tab_id, Some(target));
+        assert_eq!(state.tabs.len(), 2);
+        let tab = state.active_tab().unwrap();
+        assert_eq!(tab.selected_index, Some(0));
+        assert!(tab.has_unsaved_changes);
+        assert!(tab.file.dds_list[0].modified);
+        assert!(std::sync::Arc::ptr_eq(&tab.file.dds_list[0].bytes, &edited));
+        assert!(tab.replace_backups.contains_key(&0));
+        fs::remove_file(&path).unwrap();
+        state.active_tab_id = Some(state.tabs[1].id);
+        state.queue_file_load(canonical);
+        assert_eq!(state.active_tab_id, Some(target));
+        assert_eq!(state.loading.pending_count(), 0);
+        assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn reopening_invalidated_alias_activates_existing_tab_in_background() {
+        let folder = TempFolder::new();
+        let path = folder.0.join("open.streamtex");
+        stream_fixture(&path);
+        let alias = file_alias(&path);
+        let mut state = AppState::default();
+        state.queue_file_load(path.clone());
+        finish_loading(&mut state);
+        let target = state.active_tab_id.unwrap();
+        let bytes = state.active_tab().unwrap().file.dds_list[0].bytes.clone();
+        state.load_file(test_file("other.textures", 0));
+        let other = state.active_tab_id;
+        fs::write(path, b"TEXS").unwrap();
+        state.queue_file_load(alias);
+        assert_eq!(state.loading.pending_count(), 1);
+        assert_eq!(state.active_tab_id, other);
+        finish_loading(&mut state);
+        assert_eq!(state.active_tab_id, Some(target));
+        assert_eq!(state.tabs.len(), 2);
+        assert!(std::sync::Arc::ptr_eq(
+            &state.active_tab().unwrap().file.dds_list[0].bytes,
+            &bytes
+        ));
+        assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn exact_duplicate_activation_waits_for_earlier_queued_requests() {
+        let folder = TempFolder::new();
+        let first = folder.0.join("first.streamtex");
+        let second = folder.0.join("second.streamtex");
+        stream_fixture(&first);
+        stream_fixture(&second);
+        let mut state = AppState::default();
+        state.queue_file_load(first.clone());
+        finish_loading(&mut state);
+        let target = state.active_tab_id.unwrap();
+        let canonical = state.active_tab().unwrap().file.path.clone();
+        state.load_file(test_file("other.textures", 0));
+        let other = state.active_tab_id;
+        fs::write(first, b"TEXS").unwrap();
+        state.queue_file_load(second.clone());
+        state.queue_file_load(canonical);
+        assert_eq!(state.active_tab_id, other);
+        assert_eq!(state.loading.pending_count(), 2);
+        finish_loading(&mut state);
+        assert_eq!(state.tabs.len(), 3);
+        assert_eq!(state.tabs[2].file.path, fs::canonicalize(second).unwrap());
+        assert_eq!(state.active_tab_id, Some(target));
+        assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn closing_tab_before_queued_alias_dispatch_reloads_in_request_order() {
+        let folder = TempFolder::new();
+        let first = folder.0.join("first.streamtex");
+        let second = folder.0.join("second.streamtex");
+        stream_fixture(&first);
+        stream_fixture(&second);
+        let alias = file_alias(&first);
+        let mut state = AppState::default();
+        state.queue_file_load(first.clone());
+        finish_loading(&mut state);
+        let closed = state.active_tab_id.unwrap();
+        state.queue_file_load(alias);
+        state.queue_file_load(second.clone());
+        state.force_close_tab(closed);
+        finish_loading(&mut state);
+        assert_eq!(state.tabs.len(), 2);
+        assert_ne!(state.tabs[0].id, closed);
+        assert_eq!(state.tabs[0].file.path, fs::canonicalize(first).unwrap());
+        assert_eq!(state.tabs[1].file.path, fs::canonicalize(second).unwrap());
+        assert_eq!(state.active_tab_id, Some(state.tabs[1].id));
+        assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn closing_tab_after_alias_resolution_retries_and_reports_invalid_disk_contents() {
+        let folder = TempFolder::new();
+        let first = folder.0.join("first.streamtex");
+        let second = folder.0.join("second.streamtex");
+        stream_fixture(&first);
+        stream_fixture(&second);
+        let alias = file_alias(&first);
+        let mut state = AppState::default();
+        state.queue_file_load(first.clone());
+        finish_loading(&mut state);
+        let closed = state.active_tab_id.unwrap();
+        let canonical = state.active_tab().unwrap().file.path.clone();
+        fs::write(&first, b"TEXS").unwrap();
+        state.queue_file_load(alias);
+        state.queue_file_load(second.clone());
+        let results = queued_load_results(&mut state);
+        assert!(matches!(
+            &results[..],
+            [Ok(LoadedContent::ExistingFile(path))] if path == &canonical
+        ));
+        state.force_close_tab(closed);
+        for result in results {
+            state.integrate_load_result(result);
+        }
+        assert_eq!(state.loading.pending_count(), 2);
+        state.process_load_results(&egui::Context::default());
+        assert!(state.tabs.is_empty());
+        finish_loading(&mut state);
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.tabs[0].file.path, fs::canonicalize(second).unwrap());
+        assert_eq!(state.active_tab_id, Some(state.tabs[0].id));
+        let error = state.error_message.as_deref().unwrap();
+        assert!(error.contains("first.streamtex"));
+        assert!(error.contains("console TEXS"));
+    }
+
+    #[test]
+    fn gallery_files_do_not_count_as_standalone_loaded_paths() {
+        let folder = TempFolder::new();
+        let path = folder.0.join("file.streamtex");
+        stream_fixture(&path);
+        let mut state = AppState::default();
+        state.load_multi_file_gallery(vec![path.clone()], true);
+        finish_loading(&mut state);
+        let gallery = state.active_tab_id.unwrap();
+        state.queue_file_load(fs::canonicalize(&path).unwrap());
+        assert_eq!(state.loading.pending_count(), 1);
+        finish_loading(&mut state);
+        assert_eq!(state.tabs.len(), 2);
+        assert_eq!(state.tabs[0].id, gallery);
+        assert!(state.tabs[0].folder_gallery.is_some());
+        assert!(state.tabs[1].folder_gallery.is_none());
+        assert_eq!(state.active_tab_id, Some(state.tabs[1].id));
+        assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn successful_loads_do_not_hide_other_load_failures() {
+        let mut state = AppState::default();
+        state.integrate_load_result(Err("first load failed".to_string()));
+        state.integrate_load_result(Ok(LoadedContent::File(test_file("loaded.textures", 0))));
+        state.integrate_load_result(Err("another load failed".to_string()));
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.tabs[0].selected_index, None);
+        let error = state.error_message.as_deref().unwrap();
+        assert!(error.contains("first load failed"));
+        assert!(error.contains("another load failed"));
+    }
+
+    #[test]
+    fn duplicate_load_keeps_selection_and_unsaved_edits() {
+        let mut state = AppState::default();
+        let file = test_file("same.textures", 2);
+        state.load_file(file.clone());
+        let tab = state.active_tab_mut().unwrap();
+        tab.selected_index = Some(1);
+        let original = AppState::dds_by_index(tab, 1).unwrap().clone();
+        AppState::apply_prepared_replacement_to_index(tab, 1, &original, prepared_for(&original))
+            .unwrap();
+        state.load_file(file);
+        assert_eq!(state.tabs.len(), 1);
+        let tab = state.active_tab().unwrap();
+        assert_eq!(tab.selected_index, Some(1));
+        assert!(tab.has_unsaved_changes);
+        assert!(AppState::dds_by_index(tab, 1).unwrap().modified);
+        assert!(tab.replace_backups.contains_key(&1));
+    }
+
+    #[test]
+    fn gallery_integration_preserves_global_indices_and_collapsed_sections() {
+        let mut state = AppState::default();
+        let build = GalleryBuild {
+            path: PathBuf::from("synthetic-folder"),
+            is_folder: true,
+            include_multi_texture: true,
+            files: vec![
+                test_file("first.textures", 2),
+                test_file("second.textures", 1),
+            ],
+            index_map: vec![(0, 0), (0, 1), (1, 0)],
+            file_global_ranges: vec![0..2, 2..3],
+            file_expanded: vec![false, true],
+            warnings: vec!["skipped invalid file".to_string()],
+        };
+        state.integrate_load_result(Ok(LoadedContent::Gallery(build)));
+        let tab = state.active_tab().unwrap();
+        assert_eq!(tab.selected_index, Some(0));
+        assert_eq!(AppState::total_textures_in_tab(tab), 3);
+        assert_eq!(
+            AppState::original_filename_in_tab(tab, 2).as_deref(),
+            Some("second.textures")
+        );
+        assert!(tab.file.streamtex_layout.is_none());
+        let gallery = tab.folder_gallery.as_ref().unwrap();
+        assert_eq!(gallery.file_global_ranges, vec![0..2, 2..3]);
+        assert_eq!(gallery.file_expanded, vec![false, true]);
+        assert!(gallery.is_folder);
+        assert!(state
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("skipped invalid file"));
+    }
+
+    #[test]
+    fn replacement_and_undo_restore_the_previous_modified_flag() {
+        for modified in [false, true] {
+            let mut state = AppState::default();
+            let mut file = test_file("undo.textures", 1);
+            file.dds_list[0].modified = modified;
+            let original = file.dds_list[0].clone();
+            state.load_file(file);
+            let tab = state.active_tab_mut().unwrap();
+            AppState::apply_prepared_replacement_to_index(
+                tab,
+                0,
+                &original,
+                prepared_for(&original),
+            )
+            .unwrap();
+            assert!(tab.file.dds_list[0].modified);
+            assert!(tab.has_unsaved_changes);
+            assert_eq!(tab.replace_backups[&0].modified, modified);
+            state.undo_selected_replace();
+            let tab = state.active_tab().unwrap();
+            assert_eq!(tab.file.dds_list[0].modified, modified);
+            assert!(std::sync::Arc::ptr_eq(
+                &tab.file.dds_list[0].bytes,
+                &original.bytes
+            ));
+            assert!(!tab.has_unsaved_changes);
+            assert!(tab.replace_backups.is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_replacement_index_does_not_create_a_backup_or_mark_dirty() {
+        let mut state = AppState::default();
+        state.load_file(test_file("invalid-index.textures", 1));
+        let tab = state.active_tab_mut().unwrap();
+        let original = tab.file.dds_list[0].clone();
+        assert!(AppState::apply_prepared_replacement_to_index(
+            tab,
+            5,
+            &original,
+            prepared_for(&original),
+        )
+        .is_none());
+        assert!(!tab.has_unsaved_changes);
+        assert!(tab.replace_backups.is_empty());
+    }
+
+    #[test]
+    fn dialog_and_drop_replacement_helper_targets_the_requested_tab() {
+        let folder = TempFolder::new();
+        let mut state = AppState::default();
+        state.load_file(test_file("target.textures", 1));
+        let target = state.active_tab_id.unwrap();
+        let original = state.active_tab().unwrap().file.dds_list[0].clone();
+        let replacement = folder.0.join("replacement.dds");
+        fs::write(&replacement, prepared_for(&original).bytes).unwrap();
+        state.load_file(test_file("other.textures", 1));
+        state.replace_from_path(target, 0, &replacement);
+        assert!(state.tab_by_id(target).unwrap().file.dds_list[0].modified);
+        assert!(state.tab_by_id(target).unwrap().has_unsaved_changes);
+        assert!(!state.active_tab().unwrap().has_unsaved_changes);
+        assert!(!state.active_tab().unwrap().file.dds_list[0].modified);
+    }
+
+    #[test]
+    fn batch_apply_revalidates_current_options_and_marks_successful_entries_modified() {
+        let folder = TempFolder::new();
+        let source = folder.0.join("orig.dds");
+        fs::write(&source, make_dxt1_dds(16, 8, 1)).unwrap();
+        let mut state = AppState {
+            resize_on_replace: true,
+            batch_replace_folder: Some(folder.0.clone()),
+            ..Default::default()
+        };
+        state.load_file(test_file("batch.textures", 1));
+        state.batch_replace_tab_id = state.active_tab_id;
+        state.scan_batch_replace();
+        assert!(state.batch_replace_entries[0].is_ready());
+        state.resize_on_replace = false;
+        state.apply_batch_replace();
+        assert!(!state.active_tab().unwrap().has_unsaved_changes);
+        assert!(!state.active_tab().unwrap().file.dds_list[0].modified);
+        state.resize_on_replace = true;
+        let mut latest = make_dxt1_dds(16, 8, 1);
+        latest[128] = 0x12;
+        fs::write(&source, &latest).unwrap();
+        state.apply_batch_replace();
+        let tab = state.active_tab().unwrap();
+        assert!(tab.has_unsaved_changes);
+        assert!(tab.file.dds_list[0].modified);
+        assert_eq!(tab.file.dds_list[0].width, 16);
+        assert_eq!(tab.file.dds_list[0].bytes[128], 0x12);
+    }
+
+    #[test]
+    fn sidecar_save_failure_keeps_dirty_state_backups_and_snapshot() {
+        let folder = TempFolder::new();
+        let path = folder.0.join("paired.streamtex");
+        let file = stream_fixture(&path);
+        fs::write(path.with_extension("textures"), b"TEXS").unwrap();
+        let snapshot = file.original_bytes.clone();
+        let original = file.dds_list[0].clone();
+        let mut state = AppState {
+            streamtex_patch_sidecar: true,
+            ..Default::default()
+        };
+        state.load_file(file);
+        AppState::apply_prepared_replacement_to_index(
+            state.active_tab_mut().unwrap(),
+            0,
+            &original,
+            prepared_for(&original),
+        )
+        .unwrap();
+        state.save_changes();
+        let tab = state.active_tab().unwrap();
+        assert!(tab.has_unsaved_changes);
+        assert!(tab.replace_backups.contains_key(&0));
+        assert!(tab.file.dds_list[0].modified);
+        assert_eq!(tab.file.original_bytes, snapshot);
+        assert!(state.error_message.as_deref().unwrap().contains("sidecar"));
+    }
+
+    #[test]
+    fn successful_save_keeps_modified_flags_and_next_undo_restores_saved_entry() {
+        let folder = TempFolder::new();
+        let file = stream_fixture(&folder.0.join("save.streamtex"));
+        let snapshot = file.original_bytes.clone();
+        let original = file.dds_list[0].clone();
+        let mut state = AppState::default();
+        state.load_file(file);
+        AppState::apply_prepared_replacement_to_index(
+            state.active_tab_mut().unwrap(),
+            0,
+            &original,
+            prepared_for(&original),
+        )
+        .unwrap();
+        state.save_changes();
+        assert!(state.error_message.is_none());
+        let tab = state.active_tab().unwrap();
+        assert!(!tab.has_unsaved_changes);
+        assert!(tab.replace_backups.is_empty());
+        assert!(tab.file.dds_list[0].modified);
+        assert_eq!(tab.file.original_bytes, snapshot);
+        let saved = tab.file.dds_list[0].clone();
+        AppState::apply_prepared_replacement_to_index(
+            state.active_tab_mut().unwrap(),
+            0,
+            &saved,
+            prepared_for(&saved),
+        )
+        .unwrap();
+        state.undo_selected_replace();
+        let tab = state.active_tab().unwrap();
+        assert!(tab.file.dds_list[0].modified);
+        assert!(std::sync::Arc::ptr_eq(
+            &tab.file.dds_list[0].bytes,
+            &saved.bytes
+        ));
+        assert!(!tab.has_unsaved_changes);
+    }
+
+    #[test]
+    fn full_preview_key_exists_only_for_the_visible_valid_selection() {
+        let mut state = AppState::default();
+        state.load_file(test_file("preview.textures", 1));
+        let id = state.active_tab_id.unwrap();
+        assert_eq!(state.active_full_preview_key(), None);
+        state.active_tab_mut().unwrap().show_full_preview = true;
+        assert_eq!(state.active_full_preview_key(), Some((id, 0)));
+        state.show_logs = true;
+        assert_eq!(state.active_full_preview_key(), None);
+        state.show_logs = false;
+        state.show_about = true;
+        assert_eq!(state.active_full_preview_key(), None);
+        state.show_about = false;
+        state.show_tweaks = true;
+        assert_eq!(state.active_full_preview_key(), None);
+        state.show_tweaks = false;
+        state.active_tab_mut().unwrap().selected_index = Some(10);
+        assert_eq!(state.active_full_preview_key(), None);
+        state.force_close_tab(id);
+        assert_eq!(state.active_full_preview_key(), None);
     }
 
     #[test]

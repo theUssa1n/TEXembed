@@ -3,10 +3,11 @@ use egui::{Color32, CursorIcon, FontFamily, FontId, Pos2, Rect, Sense, Vec2};
 
 use super::constants::{
     COLOR_ACCENT_ORANGE, COLOR_BG, COLOR_BORDER_MEDIUM, COLOR_BORDER_SUBTLE, COLOR_BTN_BLUE,
-    COLOR_CARD_SURFACE, COLOR_LABEL_BLUE, COLOR_PRIMARY_BORDER, COLOR_PRIMARY_TRANSLUCENT,
-    COLOR_TEXT, COLOR_TEXT_SECONDARY, THUMBNAIL_SIZE,
+    COLOR_CARD_SURFACE, COLOR_LABEL_BLUE, COLOR_PREVIEW_BG, COLOR_PRIMARY_BORDER,
+    COLOR_PRIMARY_TRANSLUCENT, COLOR_TEXT, COLOR_TEXT_SECONDARY, THUMBNAIL_SIZE,
 };
-use super::state::{AboutSection, AppState, PreviewState};
+use super::grid_layout::{GridMetrics, GridRowKind, GroupedGridLayout};
+use super::state::{AboutSection, AppState, FolderGallery, PreviewState, Tab};
 use super::widgets::{
     brighten_color, ghost_button, guide_card, paint_checkerboard, paint_texture_fitted,
 };
@@ -20,27 +21,53 @@ pub(super) fn draw(state: &mut AppState, ctx: &egui::Context) {
         )
         .show(ctx, |ui| {
             if state.show_about {
+                set_thumbnail_demand(state, &[]);
                 draw_about(state, ui);
                 return;
             }
 
             if state.show_logs {
+                set_thumbnail_demand(state, &[]);
                 draw_logs(state, ui);
                 return;
             }
 
             if state.show_tweaks {
+                set_thumbnail_demand(state, &[]);
                 draw_tweaks(state, ui);
                 return;
             }
 
             if state.active_tab().is_some_and(|t| t.show_full_preview) {
+                set_thumbnail_demand(state, &[]);
                 draw_full_preview(state, ctx, ui);
                 return;
             }
 
             draw_grid(state, ctx, ui);
         });
+}
+
+fn set_thumbnail_demand(state: &mut AppState, indices: &[usize]) {
+    let tab_id = state.active_tab_id;
+    let selected = if state.show_about || state.show_logs || state.show_tweaks {
+        None
+    } else {
+        state.active_tab().and_then(|tab| {
+            let index = tab.selected_index?;
+            AppState::dds_by_index(tab, index)?;
+            Some((tab.id, index))
+        })
+    };
+    state.previews.set_visible_thumbnails(
+        indices
+            .iter()
+            .filter_map(|index| tab_id.map(|id| (id, *index))),
+        selected,
+    );
+    if let Some((tab_id, index)) = selected {
+        state.enqueue_preview_load(tab_id, index);
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -61,8 +88,12 @@ fn draw_about(state: &mut AppState, ui: &mut egui::Ui) {
     ui.add_space(12.0);
 
     ui.horizontal(|ui| {
-        if about_tab_button(ui, "General Guide", state.about_section == AboutSection::Guide)
-            .clicked()
+        if about_tab_button(
+            ui,
+            "General Guide",
+            state.about_section == AboutSection::Guide,
+        )
+        .clicked()
         {
             state.about_section = AboutSection::Guide;
         }
@@ -381,9 +412,11 @@ fn draw_about_argb(ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("• .streamtex: a plain sequence of records, each [u32 length][full DDS].")
-                    .color(COLOR_TEXT)
-                    .size(14.0),
+                egui::RichText::new(
+                    "• .streamtex: a plain sequence of records, each [u32 length][full DDS].",
+                )
+                .color(COLOR_TEXT)
+                .size(14.0),
             );
         });
         ui.add_space(2.0);
@@ -541,14 +574,18 @@ fn draw_about_argb(ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("1. Make sure you use the SSDC v2 build (see above).").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new("1. Make sure you use the SSDC v2 build (see above).")
+                    .color(COLOR_TEXT)
+                    .size(14.0),
             );
         });
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("2. Open the bodypaint.textures of the car you want.").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new("2. Open the bodypaint.textures of the car you want.")
+                    .color(COLOR_TEXT)
+                    .size(14.0),
             );
         });
         ui.add_space(2.0);
@@ -569,14 +606,20 @@ fn draw_about_argb(ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("5. Save with Ctrl+S. The log tells you when the header is patched.").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new(
+                    "5. Save with Ctrl+S. The log tells you when the header is patched.",
+                )
+                .color(COLOR_TEXT)
+                .size(14.0),
             );
         });
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             ui.add_space(16.0);
             ui.label(
-                egui::RichText::new("6. Launch the game and check the car.").color(COLOR_TEXT).size(14.0),
+                egui::RichText::new("6. Launch the game and check the car.")
+                    .color(COLOR_TEXT)
+                    .size(14.0),
             );
         });
     });
@@ -728,13 +771,7 @@ fn draw_tweaks(state: &mut AppState, ui: &mut egui::Ui) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tweak_card(
-    ui: &mut egui::Ui,
-    value: &mut bool,
-    title: &str,
-    plain: &str,
-    safe: &str,
-) {
+fn tweak_card(ui: &mut egui::Ui, value: &mut bool, title: &str, plain: &str, safe: &str) {
     egui::Frame::none()
         .fill(COLOR_CARD_SURFACE)
         .stroke(egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE))
@@ -743,7 +780,13 @@ fn tweak_card(
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.checkbox(value, egui::RichText::new(title).color(COLOR_TEXT).strong().size(15.0));
+                ui.checkbox(
+                    value,
+                    egui::RichText::new(title)
+                        .color(COLOR_TEXT)
+                        .strong()
+                        .size(15.0),
+                );
             });
             ui.add_space(6.0);
             ui.add(
@@ -759,7 +802,9 @@ fn tweak_card(
                 );
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(safe).color(COLOR_TEXT_SECONDARY).size(13.0),
+                        egui::RichText::new(safe)
+                            .color(COLOR_TEXT_SECONDARY)
+                            .size(13.0),
                     )
                     .wrap(),
                 );
@@ -785,16 +830,13 @@ fn draw_texture_card(
     is_selected: bool,
     is_unsaved: bool,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(card_size), Sense::click());
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(card_size), Sense::hover());
+    let response = ui.interact(
+        rect,
+        ui.id().with(("texture_card", tab_id, index)),
+        Sense::click(),
+    );
 
-    // Cards scrolled out of view still need their layout slot (for correct
-    // scrollbar/row geometry and click hit-testing once visible again), but
-    // skip every paint call for them. In large multi-texture folders every
-    // file section is expanded by default and drawn unconditionally, so
-    // without this guard hundreds/thousands of off-screen cards would still
-    // pay for background fills, texture blits, and stroke tessellation on
-    // every single frame, which is what causes the stutter right after
-    // opening a folder.
     if !ui.clip_rect().intersects(rect) {
         return response.on_hover_cursor(CursorIcon::PointingHand);
     }
@@ -815,11 +857,11 @@ fn draw_texture_card(
     }
 
     let bg = if is_hovered {
-        brighten_color(COLOR_CARD_SURFACE, 1.14)
+        brighten_color(COLOR_PREVIEW_BG, 1.14)
     } else if is_selected {
-        brighten_color(COLOR_CARD_SURFACE, 1.08)
+        brighten_color(COLOR_PREVIEW_BG, 1.08)
     } else {
-        COLOR_CARD_SURFACE
+        COLOR_PREVIEW_BG
     };
     painter.rect_filled(draw_rect, rounding, bg);
     painter.rect_stroke(
@@ -828,6 +870,15 @@ fn draw_texture_card(
         egui::Stroke::new(1.0_f32, COLOR_BORDER_SUBTLE),
     );
 
+    if state.show_transparency_bg {
+        paint_checkerboard(
+            ui,
+            draw_rect.shrink(4.0),
+            10.0,
+            Color32::from_rgb(38, 38, 42),
+            Color32::from_rgb(26, 26, 30),
+        );
+    }
     if let Some(PreviewState::Ready(texture)) = state.previews.get(&(tab_id, index)) {
         paint_texture_fitted(ui, draw_rect.shrink(4.0), texture);
     }
@@ -883,7 +934,7 @@ fn draw_full_preview(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
     let mut full_preview_zoom = tab.full_preview_zoom;
     let mut full_preview_pan = tab.full_preview_pan;
 
-    state.enqueue_preview_load(tab_id, index);
+    state.enqueue_full_preview_load(tab_id, index);
 
     ui.horizontal(|ui| {
         ui.label(
@@ -915,7 +966,7 @@ fn draw_full_preview(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
     let response = response.on_hover_cursor(CursorIcon::Grab);
 
     ui.painter()
-        .rect_filled(rect, egui::Rounding::same(10.0), COLOR_CARD_SURFACE);
+        .rect_filled(rect, egui::Rounding::same(10.0), COLOR_PREVIEW_BG);
     ui.painter().rect_stroke(
         rect,
         egui::Rounding::same(10.0),
@@ -947,7 +998,8 @@ fn draw_full_preview(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                 let z_new = (z_old * zoom_delta).clamp(0.1, 20.0);
 
                 if z_old != 0.0 && (content_rect.width() > 0.0 && content_rect.height() > 0.0) {
-                    if let Some(PreviewState::Ready(texture)) = state.previews.get(&(tab_id, index))
+                    if let Some(PreviewState::Ready(texture)) =
+                        state.previews.get_full(&(tab_id, index))
                     {
                         let tex_size = texture.size_vec2();
                         if tex_size.x > 0.0 && tex_size.y > 0.0 {
@@ -989,7 +1041,8 @@ fn draw_full_preview(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                 let z_new = (z_old * factor).clamp(0.1, 20.0);
 
                 if z_old != 0.0 {
-                    if let Some(PreviewState::Ready(texture)) = state.previews.get(&(tab_id, index))
+                    if let Some(PreviewState::Ready(texture)) =
+                        state.previews.get_full(&(tab_id, index))
                     {
                         let tex_size = texture.size_vec2();
                         if tex_size.x > 0.0 && tex_size.y > 0.0 {
@@ -1024,7 +1077,7 @@ fn draw_full_preview(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
         }
     }
 
-    let preview_state = state.previews.get(&(tab_id, index));
+    let preview_state = state.previews.get_full(&(tab_id, index));
     match preview_state {
         Some(PreviewState::Ready(texture)) => {
             let tex_size = texture.size_vec2();
@@ -1051,11 +1104,16 @@ fn draw_full_preview(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                 );
             }
         }
-        _ => {
+        preview => {
+            let message = if preview.is_none() {
+                "Loading preview..."
+            } else {
+                "Preview\nnot\navailable"
+            };
             ui.painter().text(
                 content_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "Preview\nnot\navailable",
+                message,
                 FontId::new(26.0, FontFamily::Proportional),
                 Color32::WHITE,
             );
@@ -1067,15 +1125,157 @@ fn draw_full_preview(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
         tab.full_preview_zoom = full_preview_zoom;
         tab.full_preview_pan = full_preview_pan;
     }
+    if !show_full_preview {
+        state.previews.retain_full(None);
+    }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#[derive(Default)]
+struct GridActions {
+    enqueue: Vec<usize>,
+    clicked: Option<usize>,
+    toggle_files: Vec<usize>,
+}
+
+fn draw_grid_cards(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    tab: &Tab,
+    indices: std::ops::Range<usize>,
+    actions: &mut GridActions,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        for index in indices {
+            let response = draw_texture_card(
+                ui,
+                state,
+                tab.id,
+                index,
+                THUMBNAIL_SIZE,
+                tab.selected_index == Some(index),
+                AppState::is_index_unsaved(tab, index),
+            );
+            if ui.clip_rect().intersects(response.rect) {
+                actions.enqueue.push(index);
+            }
+            if response.clicked() {
+                actions.clicked = Some(index);
+            }
+        }
+    });
+}
+
+fn draw_group_header(ui: &mut egui::Ui, file_name: &str, expanded: bool, height: f32) -> bool {
+    let origin = ui.max_rect().min;
+    let button_height = height - 6.0;
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let arrow = if expanded { "v" } else { ">" };
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(22.0, button_height), Sense::hover());
+        let response = ui
+            .interact(rect, ui.id().with("file_toggle"), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand);
+        let visuals = ui.style().interact(&response);
+        ui.painter().rect(
+            rect,
+            visuals.rounding,
+            visuals.weak_bg_fill,
+            visuals.bg_stroke,
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            arrow,
+            FontId::new(13.0, FontFamily::Proportional),
+            visuals.fg_stroke.color,
+        );
+        clicked = response.clicked();
+        ui.add(
+            egui::Label::new(egui::RichText::new(file_name).color(COLOR_TEXT).size(13.0))
+                .truncate()
+                .sense(Sense::hover()),
+        )
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(file_name);
+    });
+    let line = Rect::from_min_size(
+        origin + Vec2::new(0.0, button_height),
+        Vec2::new(ui.max_rect().width(), 1.0),
+    );
+    ui.painter().rect_filled(line, 0.0, COLOR_BORDER_SUBTLE);
+    clicked
+}
+
+fn draw_grouped_grid(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    tab: &Tab,
+    gallery: &FolderGallery,
+    actions: &mut GridActions,
+) {
+    egui::ScrollArea::vertical()
+        .id_salt(("textures_scroll", tab.id))
+        .show_viewport(ui, |ui, viewport| {
+            let spacing = 5.0;
+            let width = ui.available_width();
+            let columns = ((width + spacing) / (THUMBNAIL_SIZE + spacing)).floor() as usize;
+            let metrics = GridMetrics {
+                columns,
+                card_height: THUMBNAIL_SIZE,
+                row_gap: spacing,
+                header_height: ui.spacing().interact_size.y.max(22.0) + 6.0,
+                section_gap: spacing,
+            };
+            let sections = (0..gallery.files.len()).map(|index| {
+                let indices = gallery
+                    .file_global_ranges
+                    .get(index)
+                    .cloned()
+                    .unwrap_or(0..0);
+                let expanded = gallery.file_expanded.get(index).copied().unwrap_or(true);
+                (indices, expanded)
+            });
+            let layout = GroupedGridLayout::new(sections, metrics);
+            ui.set_width(width);
+            ui.set_height(layout.height());
+            let origin = ui.max_rect().min;
+            for row in layout.visible_rows(viewport.min.y..viewport.max.y) {
+                let rect = Rect::from_min_size(
+                    origin + Vec2::new(0.0, row.top),
+                    Vec2::new(width, row.height),
+                );
+                let (section, row_id) = match &row.kind {
+                    GridRowKind::Header { section } => (*section, None),
+                    GridRowKind::Cards { section, indices } => (*section, Some(indices.start)),
+                };
+                let mut row_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt(("grouped_row", tab.id, section, row_id))
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                match row.kind {
+                    GridRowKind::Header { section } => {
+                        let file = &gallery.files[section];
+                        let file_name = file.path.file_name().unwrap_or_default().to_string_lossy();
+                        let expanded = gallery.file_expanded.get(section).copied().unwrap_or(true);
+                        if draw_group_header(&mut row_ui, &file_name, expanded, row.height) {
+                            actions.toggle_files.push(section);
+                        }
+                    }
+                    GridRowKind::Cards { indices, .. } => {
+                        draw_grid_cards(&mut row_ui, state, tab, indices, actions);
+                    }
+                }
+            }
+        });
+}
+
 fn draw_grid(state: &mut AppState, _ctx: &egui::Context, ui: &mut egui::Ui) {
     let Some(tab) = state.active_tab() else {
+        set_thumbnail_demand(state, &[]);
         ui.centered_and_justified(|ui| {
             let response = ui.label(
                 egui::RichText::new("Open a file or drop it here to view textures.")
@@ -1088,188 +1288,42 @@ fn draw_grid(state: &mut AppState, _ctx: &egui::Context, ui: &mut egui::Ui) {
     };
 
     let tab_id = tab.id;
-    let selected_idx = tab.selected_index;
-    let total = tab.file.dds_list.len();
+    let mut actions = GridActions::default();
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        if let Some(gallery) = tab
+            .folder_gallery
+            .as_ref()
+            .filter(|gallery| gallery.include_multi_texture)
+        {
+            draw_grouped_grid(ui, state, tab, gallery, &mut actions);
+            return;
+        }
 
-    let available_width = ui.available_width();
-    let card_size = THUMBNAIL_SIZE;
-    let spacing = 5.0;
-    let num_columns = ((available_width + spacing) / (card_size + spacing)).floor() as usize;
-    let num_columns = num_columns.max(1);
-
-    let mut to_enqueue: Vec<usize> = Vec::new();
-    let mut clicked_index: Option<usize> = None;
-    let mut toggle_files: Vec<usize> = Vec::new();
-
-    {
-        let gallery = tab.folder_gallery.as_ref();
-
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            if let Some(gallery) = gallery {
-                if gallery.include_multi_texture {
-                    egui::ScrollArea::vertical()
-                        .id_salt(("textures_scroll", tab_id))
-                        .show(ui, |ui| {
-                            for (file_idx, file) in gallery.files.iter().enumerate() {
-                                let expanded =
-                                    gallery.file_expanded.get(file_idx).copied().unwrap_or(true);
-                                let file_name = file
-                                    .path
-                                    .file_name()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("file");
-
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 8.0;
-                                    let arrow = if expanded { "v" } else { ">" };
-                                    let arrow_btn = ui
-                                        .add_sized(Vec2::new(22.0, 22.0), egui::Button::new(arrow))
-                                        .on_hover_cursor(CursorIcon::PointingHand);
-                                    if arrow_btn.clicked() {
-                                        toggle_files.push(file_idx);
-                                    }
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(file_name)
-                                                .color(COLOR_TEXT)
-                                                .size(13.0),
-                                        )
-                                        .sense(Sense::hover()),
-                                    )
-                                    .on_hover_cursor(CursorIcon::PointingHand);
-                                });
-
-                                let (line_rect, _) = ui.allocate_exact_size(
-                                    Vec2::new(ui.available_width(), 1.0),
-                                    Sense::hover(),
-                                );
-                                ui.painter().rect_filled(line_rect, 0.0, COLOR_BORDER_SUBTLE);
-                                ui.add_space(spacing);
-
-                                if expanded {
-                                    let range = gallery
-                                        .file_global_ranges
-                                        .get(file_idx)
-                                        .cloned()
-                                        .unwrap_or(0..0);
-                                    let count = range.end.saturating_sub(range.start);
-                                    let rows = count.div_ceil(num_columns);
-
-                                    for row in 0..rows {
-                                        let start = range.start + row * num_columns;
-                                        let end = (start + num_columns).min(range.end);
-
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = spacing;
-                                            for index in start..end {
-                                                let is_selected = selected_idx == Some(index);
-                                                let is_unsaved =
-                                                    AppState::is_index_unsaved(tab, index);
-                                                let response = draw_texture_card(
-                                                    ui,
-                                                    state,
-                                                    tab_id,
-                                                    index,
-                                                    card_size,
-                                                    is_selected,
-                                                    is_unsaved,
-                                                );
-                                                if ui.clip_rect().intersects(response.rect) {
-                                                    to_enqueue.push(index);
-                                                }
-
-                                                if response.clicked() {
-                                                    clicked_index = Some(index);
-                                                }
-                                            }
-                                        });
-                                        ui.add_space(spacing);
-                                    }
-                                }
-
-                                ui.add_space(spacing);
-                            }
-                        });
-                } else {
-                    let total = gallery.index_map.len();
-                    let row_count = total.div_ceil(num_columns);
-                    let row_height = card_size + spacing;
-
-                    egui::ScrollArea::vertical()
-                        .id_salt(("textures_scroll", tab_id))
-                        .show_rows(ui, row_height, row_count, |ui, row_range| {
-                            for row in row_range {
-                                let start = row * num_columns;
-                                let end = (start + num_columns).min(total);
-
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = spacing;
-                                    for index in start..end {
-                                        let is_selected = selected_idx == Some(index);
-                                        let is_unsaved = AppState::is_index_unsaved(tab, index);
-                                        let response = draw_texture_card(
-                                            ui,
-                                            state,
-                                            tab_id,
-                                            index,
-                                            card_size,
-                                            is_selected,
-                                            is_unsaved,
-                                        );
-                                        to_enqueue.push(index);
-
-                                        if response.clicked() {
-                                            clicked_index = Some(index);
-                                        }
-                                    }
-                                });
-                                ui.add_space(spacing);
-                            }
-                        });
+        let total = tab
+            .folder_gallery
+            .as_ref()
+            .map_or(tab.file.dds_list.len(), |gallery| gallery.index_map.len());
+        let spacing = 5.0;
+        let columns = (((ui.available_width() + spacing) / (THUMBNAIL_SIZE + spacing)).floor()
+            as usize)
+            .max(1);
+        let row_count = total.div_ceil(columns);
+        egui::ScrollArea::vertical()
+            .id_salt(("textures_scroll", tab_id))
+            .show_rows(ui, THUMBNAIL_SIZE + spacing, row_count, |ui, rows| {
+                for row in rows {
+                    let start = row * columns;
+                    let end = start.saturating_add(columns).min(total);
+                    draw_grid_cards(ui, state, tab, start..end, &mut actions);
+                    ui.add_space(spacing);
                 }
-            } else {
-                let row_count = total.div_ceil(num_columns);
-                let row_height = card_size + spacing;
-
-                egui::ScrollArea::vertical()
-                    .id_salt(("textures_scroll", tab_id))
-                    .show_rows(ui, row_height, row_count, |ui, row_range| {
-                        for row in row_range {
-                            let start = row * num_columns;
-                            let end = (start + num_columns).min(total);
-
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = spacing;
-                                for index in start..end {
-                                    let is_selected = selected_idx == Some(index);
-                                    let is_unsaved = AppState::is_index_unsaved(tab, index);
-                                    let response = draw_texture_card(
-                                        ui,
-                                        state,
-                                        tab_id,
-                                        index,
-                                        card_size,
-                                        is_selected,
-                                        is_unsaved,
-                                    );
-                                    to_enqueue.push(index);
-
-                                    if response.clicked() {
-                                        clicked_index = Some(index);
-                                    }
-                                }
-                            });
-                            ui.add_space(spacing);
-                        }
-                    });
-            }
-        });
-    }
+            });
+    });
 
     if let Some(t) = state.active_tab_mut() {
         if let Some(gallery) = t.folder_gallery.as_mut() {
-            for file_idx in toggle_files {
+            for file_idx in actions.toggle_files {
                 if let Some(v) = gallery.file_expanded.get_mut(file_idx) {
                     *v = !*v;
                 }
@@ -1277,12 +1331,13 @@ fn draw_grid(state: &mut AppState, _ctx: &egui::Context, ui: &mut egui::Ui) {
         }
     }
 
-    for index in to_enqueue {
-        state.enqueue_preview_load(tab_id, index);
-    }
-    if let Some(index) = clicked_index {
+    if let Some(index) = actions.clicked {
         if let Some(t) = state.active_tab_mut() {
             t.selected_index = Some(index);
         }
+    }
+    set_thumbnail_demand(state, &actions.enqueue);
+    for index in actions.enqueue {
+        state.enqueue_preview_load(tab_id, index);
     }
 }

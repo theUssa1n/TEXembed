@@ -4,7 +4,7 @@
 #define MyAppName "TEXembed"
 #define MyAppPublisher "SplitSecond Community"
 #define MyAppExeName "texembed.exe"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.1"
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application.

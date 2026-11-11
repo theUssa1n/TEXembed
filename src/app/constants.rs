@@ -27,7 +27,9 @@ pub const COLOR_ACCENT_ORANGE: Color32 = Color32::from_rgb(242, 146, 72);
 pub const COLOR_GRAD_BLUE_BOTTOM: Color32 = Color32::from_rgb(66, 133, 244);
 pub const COLOR_GRAD_ORANGE_BOTTOM: Color32 = Color32::from_rgb(220, 112, 40);
 pub const COLOR_GRAD_GRAY_BOTTOM: Color32 = Color32::from_rgb(62, 62, 70);
-pub const COLOR_INSPECTOR_BOX: Color32 = Color32::from_rgb(36, 36, 40);
+// Shared background for every texture preview surface (grid card, inspector
+// thumbnail, full preview) so the three views always match.
+pub const COLOR_PREVIEW_BG: Color32 = Color32::from_rgb(36, 36, 40);
 
 // Submarine-style left rail visuals.
 // NOTE: these are premultiplied (rgb already scaled by alpha). Using the raw

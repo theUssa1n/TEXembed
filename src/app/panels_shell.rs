@@ -2,15 +2,13 @@ use std::fmt::Write as _;
 
 use super::constants::{
     COLOR_ACCENT_ORANGE, COLOR_ACCENT_RED, COLOR_BG, COLOR_BTN_BLUE, COLOR_CARD,
-    COLOR_GRAD_BLUE_BOTTOM, COLOR_GRAD_GRAY_BOTTOM, COLOR_GRAD_ORANGE_BOTTOM,
-    COLOR_INSPECTOR_BOX, COLOR_LABEL_BLUE, COLOR_PANEL, COLOR_PRIMARY_GLOW,
-    COLOR_PRIMARY_TRANSLUCENT, COLOR_RAIL_HOVER, COLOR_RAIL_SEPARATOR, COLOR_TAB_ACTIVE,
-    COLOR_TAB_INACTIVE, COLOR_TEXT, COLOR_TEXT_SECONDARY, INSPECTOR_CONTENT_WIDTH,
-    INSPECTOR_WIDTH, LEFT_PANEL_WIDTH,
+    COLOR_GRAD_BLUE_BOTTOM, COLOR_GRAD_GRAY_BOTTOM, COLOR_GRAD_ORANGE_BOTTOM, COLOR_LABEL_BLUE,
+    COLOR_PANEL, COLOR_PRIMARY_GLOW, COLOR_PRIMARY_TRANSLUCENT, COLOR_RAIL_HOVER,
+    COLOR_RAIL_SEPARATOR, COLOR_TAB_ACTIVE, COLOR_TAB_INACTIVE, COLOR_TEXT, COLOR_TEXT_SECONDARY,
+    LEFT_PANEL_WIDTH,
 };
-use super::preview::format_pixel_format;
-use super::state::{AppState, BatchReplaceRule, PreviewState};
-use super::widgets::{gradient_button, paint_checkerboard, paint_texture_fitted, property_box};
+use super::state::{AppState, BatchReplaceRule};
+use super::widgets::gradient_button;
 use eframe::egui;
 use egui::{Color32, CursorIcon, FontFamily, FontId, Pos2, Rect, Sense, TextureHandle, Vec2};
 use rfd::FileDialog;
@@ -33,7 +31,7 @@ pub(super) fn draw(state: &mut AppState, ctx: &egui::Context) {
         }
 
         if paths.len() == 1 {
-            state.file_load_queue.push_back(paths.remove(0));
+            state.queue_file_load(paths.remove(0));
         } else if paths.len() > 1 {
             state.multi_open_paths = paths;
             state.multi_open_shared_view = true;
@@ -104,7 +102,7 @@ pub(super) fn draw(state: &mut AppState, ctx: &egui::Context) {
     draw_top_bar(state, ctx);
     draw_left_panel(state, ctx);
     draw_status_bar(state, ctx);
-    draw_inspector(state, ctx);
+    super::inspector::draw(state, ctx);
 }
 
 fn draw_close_dialog(state: &mut AppState, ctx: &egui::Context) {
@@ -364,7 +362,7 @@ fn draw_multi_open_dialog(state: &mut AppState, ctx: &egui::Context) {
                         state.load_multi_file_gallery(paths, include);
                     } else {
                         for path in paths {
-                            state.file_load_queue.push_back(path);
+                            state.queue_file_load(path);
                         }
                     }
                     state.show_multi_open_dialog = false;
@@ -782,11 +780,6 @@ fn draw_top_bar(state: &mut AppState, ctx: &egui::Context) {
 
                             for tab in &state.tabs {
                                 let is_active = state.active_tab_id == Some(tab.id);
-                                let bg_color = if is_active {
-                                    COLOR_TAB_ACTIVE
-                                } else {
-                                    COLOR_TAB_INACTIVE
-                                };
                                 let title = tab
                                     .file
                                     .path
@@ -798,6 +791,7 @@ fn draw_top_bar(state: &mut AppState, ctx: &egui::Context) {
                                 } else {
                                     title.to_string()
                                 };
+                                let is_unsaved = tab.has_unsaved_changes;
 
                                 let rounding = egui::Rounding {
                                     nw: 6.0,
@@ -805,23 +799,26 @@ fn draw_top_bar(state: &mut AppState, ctx: &egui::Context) {
                                     sw: 0.0,
                                     se: 0.0,
                                 };
+                                let bg_color = if is_active {
+                                    COLOR_TAB_ACTIVE
+                                } else {
+                                    COLOR_TAB_INACTIVE
+                                };
                                 let tab_frame = egui::Frame::none()
                                     .fill(bg_color)
                                     .rounding(rounding)
                                     .inner_margin(egui::Margin::symmetric(16.0, 6.0));
-
                                 let response = tab_frame
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 6.0;
-                                            let title_color =
-                                                if tab.has_unsaved_changes && !is_active {
-                                                    COLOR_ACCENT_ORANGE
-                                                } else if is_active {
-                                                    COLOR_TEXT
-                                                } else {
-                                                    COLOR_TEXT_SECONDARY
-                                                };
+                                            let title_color = if is_unsaved && !is_active {
+                                                COLOR_ACCENT_ORANGE
+                                            } else if is_active {
+                                                COLOR_TEXT
+                                            } else {
+                                                COLOR_TEXT_SECONDARY
+                                            };
                                             let resp = ui.add(
                                                 egui::Button::new(
                                                     egui::RichText::new(&title)
@@ -831,13 +828,14 @@ fn draw_top_bar(state: &mut AppState, ctx: &egui::Context) {
                                                 )
                                                 .frame(false),
                                             );
-                                            if tab.has_unsaved_changes {
-                                                let (dot_rect, _) = ui.allocate_exact_size(
-                                                    Vec2::splat(10.0),
-                                                    Sense::hover(),
-                                                );
+                                            if is_unsaved {
+                                                let mut dot_pos =
+                                                    resp.rect.right_top() + egui::vec2(-6.0, 0.0);
+                                                dot_pos.y += ui
+                                                    .text_style_height(&egui::TextStyle::Body)
+                                                    / 2.0;
                                                 ui.painter().circle_filled(
-                                                    dot_rect.center(),
+                                                    dot_pos,
                                                     3.5,
                                                     COLOR_ACCENT_RED,
                                                 );
@@ -846,7 +844,6 @@ fn draw_top_bar(state: &mut AppState, ctx: &egui::Context) {
                                                 tab_to_select = Some(tab.id);
                                             }
                                         });
-
                                         ui.add_space(8.0);
                                         let close_resp = ui.label(
                                             egui::RichText::new("x")
@@ -880,7 +877,6 @@ fn draw_top_bar(state: &mut AppState, ctx: &egui::Context) {
                                 if active_changed && is_active {
                                     response.scroll_to_me(Some(egui::Align::Center));
                                 }
-
                                 if response.hovered() && !is_active {
                                     ui.painter().rect_stroke(
                                         response.rect,
@@ -950,10 +946,7 @@ fn draw_left_panel(state: &mut AppState, ctx: &egui::Context) {
                 let btn_inset = 6.0;
                 let btn_w = LEFT_PANEL_WIDTH - 2.0 * btn_inset;
                 let btn_h = 38.0;
-                let btn_rect = Rect::from_center_size(
-                    slot_rect.center(),
-                    Vec2::new(btn_w, btn_h),
-                );
+                let btn_rect = Rect::from_center_size(slot_rect.center(), Vec2::new(btn_w, btn_h));
 
                 let response = ui
                     .interact(btn_rect, egui::Id::new(id), Sense::click())
@@ -1136,7 +1129,8 @@ fn draw_rail_separator(ui: &mut egui::Ui) {
     let x = available.min.x + (available.width() - w) / 2.0;
     let y = available.min.y;
     let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, 1.0));
-    ui.painter().rect_filled(rect, egui::Rounding::same(1.0), COLOR_RAIL_SEPARATOR);
+    ui.painter()
+        .rect_filled(rect, egui::Rounding::same(1.0), COLOR_RAIL_SEPARATOR);
     ui.allocate_space(Vec2::new(LEFT_PANEL_WIDTH, 1.0));
 }
 
@@ -1148,6 +1142,17 @@ fn draw_status_bar(state: &AppState, ctx: &egui::Context) {
                 .inner_margin(egui::Margin::symmetric(16.0, 6.0)),
         )
         .show(ctx, |ui| {
+            let pending = state.loading.pending_count();
+            if pending > 0 {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        egui::RichText::new(format!("Loading {pending} request(s)..."))
+                            .color(COLOR_TEXT_SECONDARY)
+                            .size(12.0),
+                    );
+                });
+            }
             let Some(tab) = state.active_tab() else {
                 return;
             };
@@ -1192,7 +1197,7 @@ fn draw_status_bar(state: &AppState, ctx: &egui::Context) {
                     let textures = AppState::total_textures_in_tab(tab);
                     let mut text = format!("Textures: {textures}");
                     if let Some(gallery) = &tab.folder_gallery {
-                        let label = if tab.file.path.is_dir() {
+                        let label = if gallery.is_folder {
                             "Folder"
                         } else {
                             "Shared"
@@ -1211,400 +1216,6 @@ fn draw_status_bar(state: &AppState, ctx: &egui::Context) {
                             .size(12.0),
                     );
                 });
-            });
-        });
-}
-
-#[allow(clippy::too_many_lines)]
-fn draw_inspector(state: &mut AppState, ctx: &egui::Context) {
-    if state.active_tab().is_none() || state.show_logs || state.show_about || state.show_tweaks {
-        return;
-    }
-
-    egui::SidePanel::right("inspector")
-        .resizable(false)
-        .exact_width(INSPECTOR_WIDTH)
-        .frame(
-            egui::Frame::none()
-                .fill(COLOR_BG)
-                .inner_margin(egui::Margin {
-                    left: 16.0,
-                    right: 4.0,
-                    top: 16.0,
-                    bottom: 16.0,
-                }),
-        )
-        .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing.y = 12.0;
-
-            ui.scope(|ui| {
-                ui.set_max_width(INSPECTOR_CONTENT_WIDTH);
-
-                let can_undo_selected = state.active_tab().is_some_and(|t| {
-                    t.selected_index
-                        .is_some_and(|idx| t.replace_backups.contains_key(&idx))
-                });
-                if state.can_save() {
-                    if can_undo_selected {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            let total_w = ui.available_width();
-                            let undo_w = 64.0;
-                            let save_w = (total_w - 8.0 - undo_w).max(0.0);
-
-                            let save_resp = gradient_button(
-                                ui,
-                                true,
-                                "Save changes",
-                                Vec2::new(save_w, 26.0),
-                                COLOR_GRAD_BLUE_BOTTOM,
-                            );
-                            if save_resp.clicked() {
-                                state.save_changes();
-                            }
-
-                            let undo_resp = gradient_button(
-                                ui,
-                                true,
-                                "Undo",
-                                Vec2::new(undo_w, 26.0),
-                                COLOR_GRAD_GRAY_BOTTOM,
-                            );
-                            if undo_resp.clicked() {
-                                state.undo_selected_replace();
-                            }
-                        });
-                    } else {
-                        let save_resp = gradient_button(
-                            ui,
-                            true,
-                            "Save changes",
-                            Vec2::new(ui.available_width(), 26.0),
-                            COLOR_GRAD_BLUE_BOTTOM,
-                        );
-                        if save_resp.clicked() {
-                            state.save_changes();
-                        }
-                    }
-                }
-
-                egui::CollapsingHeader::new("Export")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 8.0;
-                        let export_all_resp = gradient_button(
-                            ui,
-                            state.can_export_all(),
-                            "Export all as DDS",
-                            Vec2::new(ui.available_width(), 26.0),
-                            COLOR_GRAD_GRAY_BOTTOM,
-                        );
-                        if export_all_resp.clicked() {
-                            state.export_all_dds();
-                        }
-                    });
-            });
-
-            ui.add_space(6.0);
-
-            ui.scope(|ui| {
-                ui.style_mut().spacing.scroll.bar_width = 2.0;
-
-                egui::ScrollArea::vertical()
-                    .id_salt("inspector_scroll")
-                    .show(ui, |ui| {
-                        ui.set_max_width(INSPECTOR_CONTENT_WIDTH);
-                        ui.spacing_mut().item_spacing.y = 12.0;
-
-                        let Some((index, dds)) = state.selected_item().map(|(i, d)| (i, d.clone()))
-                        else {
-                            let preview_size = ui.available_width();
-                            let preview_rect =
-                                ui.allocate_space(Vec2::new(preview_size, preview_size)).1;
-                            ui.painter().rect_filled(
-                                preview_rect,
-                                egui::Rounding::same(4.0),
-                                COLOR_INSPECTOR_BOX,
-                            );
-                            ui.add_space(2.0);
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 8.0;
-                                let cb = ui.checkbox(&mut state.show_transparency_bg, "");
-                                let cb = cb.on_hover_cursor(CursorIcon::PointingHand);
-                                let label = ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new("Transparency background")
-                                            .color(COLOR_TEXT_SECONDARY)
-                                            .size(12.0),
-                                    )
-                                    .sense(Sense::click()),
-                                );
-                                let label = label.on_hover_cursor(CursorIcon::PointingHand);
-                                if label.clicked() {
-                                    state.show_transparency_bg = !state.show_transparency_bg;
-                                }
-                                if cb.hovered() || label.hovered() {
-                                    state.offer_tooltip(
-                                        egui::Id::new("tt_transparency_bg"),
-                                        "Toggle checkerboard transparency background",
-                                    );
-                                }
-                            });
-                            return;
-                        };
-
-                        let Some(tab_id) = state.active_tab_id else {
-                            return;
-                        };
-                        state.enqueue_preview_load(tab_id, index);
-                        let preview_state = state.previews.get(&(tab_id, index));
-
-                        let preview_size = ui.available_width();
-                        let (rect, preview_resp) = ui.allocate_exact_size(
-                            Vec2::splat(preview_size),
-                            Sense::click() | Sense::drag(),
-                        );
-                        let preview_resp = preview_resp.on_hover_cursor(CursorIcon::PointingHand);
-                        ui.painter().rect_filled(
-                            rect,
-                            egui::Rounding::same(4.0),
-                            COLOR_INSPECTOR_BOX,
-                        );
-                        let content_rect = rect.shrink(4.0);
-                        if state.show_transparency_bg {
-                            paint_checkerboard(
-                                ui,
-                                content_rect,
-                                10.0,
-                                Color32::from_rgb(38, 38, 42),
-                                Color32::from_rgb(26, 26, 30),
-                            );
-                        }
-
-                        if let Some(PreviewState::Ready(texture)) = preview_state {
-                            paint_texture_fitted(ui, content_rect, texture);
-                        }
-
-                        let is_hovering = preview_resp.hovered();
-                        let is_dragging_file = ctx.input(|i| !i.raw.hovered_files.is_empty());
-                        let dropped_dds_path: Option<std::path::PathBuf> = ctx.input(|i| {
-                            i.raw.dropped_files.iter().find_map(|f| {
-                                f.path.as_ref().and_then(|p| {
-                                    let is_dds = p
-                                        .extension()
-                                        .and_then(|e| e.to_str())
-                                        .is_some_and(|e| e.eq_ignore_ascii_case("dds"));
-                                    is_dds.then(|| p.clone())
-                                })
-                            })
-                        });
-
-                        if is_dragging_file {
-                            ui.painter().rect_stroke(
-                                rect,
-                                egui::Rounding::same(4.0),
-                                egui::Stroke::new(2.0_f32, COLOR_LABEL_BLUE),
-                            );
-                        }
-
-                        if let Some(path) = dropped_dds_path {
-                            let snapshot = state.active_tab().and_then(|tab| {
-                                let dds = AppState::dds_by_index(tab, index)?.clone();
-                                let file_type = AppState::file_type_by_index_cloned(tab, index)?;
-                                Some((dds.clone(), dds.name.clone(), file_type))
-                            });
-
-                            if let Some((dds_clone, dds_name, file_type)) = snapshot {
-                                state.log(&format!("Drag & drop detected: {}", path.display()));
-
-                                match std::fs::read(&path) {
-                                    Ok(new_dds_bytes) => {
-                                        match AppState::prepare_replacement_dds(
-                                            &file_type,
-                                            &dds_clone,
-                                            &new_dds_bytes,
-                                            state.patch_header_on_replace,
-                                            state.streamtex_allow_resize,
-                                            state.resize_on_replace,
-                                        ) {
-                                            Ok(prepared) => {
-                                                let super::state::PreparedReplacement {
-                                                    bytes,
-                                                    width,
-                                                    height,
-                                                    mipmap_count,
-                                                    pixel_format,
-                                                    note,
-                                                } = prepared;
-                                                let replaced_tab_id =
-                                                    state.active_tab_mut().map(|tab| {
-                                                        tab.replace_backups
-                                                            .entry(index)
-                                                            .or_insert_with(|| dds_clone.clone());
-
-                                                        if let Some(dds_info) =
-                                                            AppState::dds_by_index_mut(tab, index)
-                                                        {
-                                                            dds_info.bytes = bytes.into();
-                                                            dds_info.width = width;
-                                                            dds_info.height = height;
-                                                            dds_info.mipmap_count = mipmap_count;
-                                                            dds_info.pixel_format = pixel_format;
-                                                        }
-
-                                                        tab.has_unsaved_changes = true;
-                                                        tab.id
-                                                    });
-
-                                                if let Some(tab_id) = replaced_tab_id {
-                                                    state.invalidate_preview(tab_id, index);
-                                                }
-                                                if let Some(note) = note {
-                                                    state.log(&note);
-                                                }
-                                                state.log(&format!(
-                                                    "Replaced texture via drag & drop: {dds_name}"
-                                                ));
-                                            }
-                                            Err(err) => state.error_message = Some(err),
-                                        }
-                                    }
-                                    Err(err) => state.error_message = Some(err.to_string()),
-                                }
-                            }
-                        }
-
-                        if preview_resp.clicked() {
-                            if let Some(tab) = state.active_tab_mut() {
-                                tab.show_full_preview = true;
-                                tab.full_preview_zoom = 1.0;
-                                tab.full_preview_pan = Vec2::ZERO;
-                            }
-                            state.show_logs = false;
-                            state.show_about = false;
-                            state.show_tweaks = false;
-                        }
-
-                        if is_hovering && !is_dragging_file {
-                            state.offer_tooltip(
-                                egui::Id::new("tt_preview_drop"),
-                                "Drag & drop a DDS file to replace this texture",
-                            );
-                        }
-
-                        ui.add_space(2.0);
-
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            let cb = ui.checkbox(&mut state.show_transparency_bg, "");
-                            let cb = cb.on_hover_cursor(CursorIcon::PointingHand);
-                            let label = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new("Transparency background")
-                                        .color(COLOR_TEXT_SECONDARY)
-                                        .size(12.0),
-                                )
-                                .sense(Sense::click()),
-                            );
-                            let label = label.on_hover_cursor(CursorIcon::PointingHand);
-                            if label.clicked() {
-                                state.show_transparency_bg = !state.show_transparency_bg;
-                            }
-                            if cb.hovered() || label.hovered() {
-                                state.offer_tooltip(
-                                    egui::Id::new("tt_transparency_bg"),
-                                    "Toggle checkerboard transparency background",
-                                );
-                            }
-                        });
-
-                        let name_label = if dds.name.is_empty() {
-                            format!("texture_{index}.dds")
-                        } else {
-                            dds.name.clone()
-                        };
-                        ui.label(
-                            egui::RichText::new(name_label)
-                                .color(Color32::WHITE)
-                                .size(14.0)
-                                .strong(),
-                        );
-
-                        ui.add_space(4.0);
-
-                        ui.spacing_mut().item_spacing.y = 8.0;
-                        property_box(ui, "Width", &dds.width.to_string());
-                        property_box(ui, "Height", &dds.height.to_string());
-                        let volume_depth = super::volume::volume_depth(dds.bytes.as_ref());
-                        if volume_depth > 1 {
-                            property_box(
-                                ui,
-                                "Depth (volumetric)",
-                                &format!("{volume_depth} (3D texture)"),
-                            );
-                        }
-                        property_box(ui, "Compression", &format_pixel_format(dds.bytes.as_ref()));
-                        property_box(ui, "Mipmaps", &dds.mipmap_count.to_string());
-
-                        ui.add_space(6.0);
-
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            let btn_width = (ui.available_width() - 8.0) / 2.0;
-                            if gradient_button(
-                                ui,
-                                true,
-                                "Export DDS",
-                                Vec2::new(btn_width, 26.0),
-                                COLOR_GRAD_BLUE_BOTTOM,
-                            )
-                            .clicked()
-                            {
-                                state.export_selected();
-                            }
-                            if gradient_button(
-                                ui,
-                                true,
-                                "Replace",
-                                Vec2::new(btn_width, 26.0),
-                                COLOR_GRAD_ORANGE_BOTTOM,
-                            )
-                            .clicked()
-                            {
-                                state.replace_selected();
-                            }
-                        });
-
-                        ui.add_space(6.0);
-
-                        egui::CollapsingHeader::new("Tools")
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 8.0;
-                                if gradient_button(
-                                    ui,
-                                    state.can_batch_replace(),
-                                    "Batch Replace...",
-                                    Vec2::new(ui.available_width(), 26.0),
-                                    COLOR_GRAD_ORANGE_BOTTOM,
-                                )
-                                .clicked()
-                                {
-                                    state.open_batch_replace_dialog();
-                                }
-                                if gradient_button(
-                                    ui,
-                                    true,
-                                    "Export PNG",
-                                    Vec2::new(ui.available_width(), 26.0),
-                                    COLOR_GRAD_GRAY_BOTTOM,
-                                )
-                                .clicked()
-                                {
-                                    state.export_selected_png();
-                                }
-                            });
-                    });
             });
         });
 }

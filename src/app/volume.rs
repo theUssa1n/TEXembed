@@ -18,7 +18,12 @@ const DDSCAPS_TEXTURE: u32 = 0x0000_1000;
 const DDPF_RGB: u32 = 0x0000_0040;
 
 fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
 }
 
 fn write_u32_at(bytes: &mut [u8], offset: usize, value: u32) {

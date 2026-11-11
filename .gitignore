@@ -1,1 +1,10 @@
+# Build artifacts
 /target
+/Output
+
+# Research and sample data
+/DEEZ
+
+# Archives and scratch
+*.zip
+*.exe

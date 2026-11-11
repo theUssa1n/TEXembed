@@ -49,12 +49,9 @@ pub(super) fn guide_card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut 
                     .strong()
                     .size(9.5),
             );
-            let (div, _) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), 1.0),
-                Sense::hover(),
-            );
-            ui.painter()
-                .rect_filled(div, 0.0, COLOR_BORDER_SUBTLE);
+            let (div, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().rect_filled(div, 0.0, COLOR_BORDER_SUBTLE);
             ui.add_space(10.0);
             body(ui);
         });
@@ -179,11 +176,7 @@ pub(super) fn gradient_button(
 
 /// Submarine-style secondary toolbar button: subtle translucent fill, thin
 /// border, uppercase label. Used for header actions (Back / Clear / Reset / ±).
-pub(super) fn ghost_button(
-    ui: &mut egui::Ui,
-    text: &str,
-    size: Vec2,
-) -> egui::Response {
+pub(super) fn ghost_button(ui: &mut egui::Ui, text: &str, size: Vec2) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter();
     let rounding = egui::Rounding::same(6.0);
@@ -196,7 +189,11 @@ pub(super) fn ghost_button(
         Color32::from_white_alpha(10)
     };
     painter.rect_filled(rect, rounding, fill);
-    painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0_f32, COLOR_BORDER_MEDIUM));
+    painter.rect_stroke(
+        rect,
+        rounding,
+        egui::Stroke::new(1.0_f32, COLOR_BORDER_MEDIUM),
+    );
 
     painter.text(
         rect.center(),
