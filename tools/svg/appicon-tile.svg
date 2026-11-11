@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<defs>
+  <clipPath id="tile"><rect x="16" y="16" width="480" height="480" rx="112"/></clipPath>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#1D1D22"/><stop offset="1" stop-color="#0C0C0F"/>
+  </linearGradient>
+  <linearGradient id="or" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#FDB170"/><stop offset="1" stop-color="#E96F25"/>
+  </linearGradient>
+  <linearGradient id="bl" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#8FC0FC"/><stop offset="1" stop-color="#4A8EF2"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="0.5" cy="0.42" r="0.6">
+    <stop offset="0" stop-color="#60A5FA" stop-opacity="0.16"/>
+    <stop offset="1" stop-color="#60A5FA" stop-opacity="0"/>
+  </radialGradient>
+</defs>
+<rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+<rect x="16" y="16" width="480" height="480" rx="112" fill="url(#glow)"/>
+<g clip-path="url(#tile)" fill="#FFFFFF" fill-opacity="0.045"><rect x="360" y="360" width="28" height="28"/><rect x="416" y="360" width="28" height="28"/><rect x="388" y="388" width="28" height="28"/><rect x="444" y="388" width="28" height="28"/><rect x="360" y="416" width="28" height="28"/><rect x="416" y="416" width="28" height="28"/><rect x="388" y="444" width="28" height="28"/><rect x="444" y="444" width="28" height="28"/></g>
+<rect x="17" y="17" width="478" height="478" rx="111" fill="none"
+      stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="2"/>
+<!-- T: top bar with a diagonal right cut, plus stem -->
+<path d="M96 132 H416 L384 188 H96 Z" fill="url(#or)"/>
+<rect x="136" y="188" width="60" height="196" rx="0" fill="url(#or)"/>
+<path d="M136 188 H196 V384 H136 Z" fill="#000" fill-opacity="0.0"/>
+<!-- E: spine + three arms with diagonal cuts -->
+<rect x="224" y="208" width="56" height="176" fill="url(#bl)"/>
+<path d="M280 208 H416 L388 252 H280 Z" fill="url(#bl)"/>
+<path d="M280 274 H368 L340 318 H280 Z" fill="url(#bl)"/>
+<path d="M280 340 H416 L388 384 H280 Z" fill="url(#bl)"/>
+</svg>

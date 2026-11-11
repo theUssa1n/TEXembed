@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::time::Instant;
 
@@ -31,6 +32,59 @@ pub(super) struct FolderGallery {
 pub(super) enum BatchReplaceRule {
     ExactName,
     Index,
+    Glob,
+    Regex,
+}
+
+impl BatchReplaceRule {
+    /// Rules that derive the target name from the source file name through a
+    /// pattern and a template.
+    pub(super) const fn is_pattern_based(self) -> bool {
+        matches!(self, Self::Glob | Self::Regex)
+    }
+}
+
+/// Row filter for the batch replace table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BatchFilter {
+    All,
+    Ready,
+    Missing,
+    Conflicts,
+    Excluded,
+    Unused,
+}
+
+impl BatchFilter {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Ready => "Ready",
+            Self::Missing => "Missing",
+            Self::Conflicts => "Conflicts",
+            Self::Excluded => "Excluded",
+            Self::Unused => "Unused",
+        }
+    }
+
+    /// Whether a row is shown for this filter. `Unused` filters the list of
+    /// unused source files instead of the rows, so it never matches a row.
+    pub(super) const fn shows_row(self, entry: &BatchReplaceEntry) -> bool {
+        match self {
+            Self::All | Self::Unused => true,
+            Self::Ready => entry.is_ready() && entry.included,
+            Self::Missing => entry.is_missing(),
+            Self::Conflicts => entry.is_duplicate() || entry.has_error(),
+            Self::Excluded => !entry.included,
+        }
+    }
+
+    pub(super) fn count(self, entries: &[BatchReplaceEntry]) -> usize {
+        if matches!(self, Self::Unused) {
+            return 0;
+        }
+        entries.iter().filter(|entry| self.shows_row(entry)).count()
+    }
 }
 
 pub(super) struct BatchReplaceEntry {
@@ -41,6 +95,13 @@ pub(super) struct BatchReplaceEntry {
     pub(super) source_name: Option<String>,
     pub(super) source_size: Option<String>,
     pub(super) source_path: Option<std::path::PathBuf>,
+    /// Files that matched this target when the scan found several of them. The
+    /// user picks one from this list to resolve the ambiguity.
+    pub(super) candidates: Vec<std::path::PathBuf>,
+    /// Whether Apply should include this row.
+    pub(super) included: bool,
+    /// True when the source was picked by the user instead of the scan.
+    pub(super) manual: bool,
     pub(super) status: BatchReplaceStatus,
     pub(super) prepared: Option<PreparedReplacement>,
 }
@@ -100,6 +161,12 @@ pub(super) struct AppState {
     pub(super) batch_replace_tab_id: Option<usize>,
     pub(super) batch_replace_rule: BatchReplaceRule,
     pub(super) batch_replace_folder: Option<std::path::PathBuf>,
+    pub(super) batch_replace_pattern: String,
+    pub(super) batch_replace_template: String,
+    pub(super) batch_replace_recursive: bool,
+    pub(super) batch_replace_filter: BatchFilter,
+    pub(super) batch_replace_search: String,
+    pub(super) batch_replace_applied: Vec<usize>,
     pub(super) batch_replace_entries: Vec<BatchReplaceEntry>,
     pub(super) batch_replace_unused_sources: Vec<String>,
     pub(super) multi_open_paths: Vec<std::path::PathBuf>,
@@ -192,6 +259,12 @@ impl Default for AppState {
             batch_replace_tab_id: None,
             batch_replace_rule: BatchReplaceRule::ExactName,
             batch_replace_folder: None,
+            batch_replace_pattern: "*_d.dds".to_string(),
+            batch_replace_template: "{1}".to_string(),
+            batch_replace_recursive: false,
+            batch_replace_filter: BatchFilter::All,
+            batch_replace_search: String::new(),
+            batch_replace_applied: Vec::new(),
             batch_replace_entries: Vec::new(),
             batch_replace_unused_sources: Vec::new(),
             multi_open_paths: Vec::new(),
@@ -222,6 +295,138 @@ pub fn create_app(
         app_state.queue_file_load(path);
     }
     Box::new(app_state)
+}
+
+/// Compiles the pattern of a glob or regex batch rule. Both are anchored and
+/// matched case-insensitively because Windows file names are case-insensitive.
+pub(super) fn compile_batch_pattern(
+    rule: BatchReplaceRule,
+    pattern: &str,
+) -> Result<regex::Regex, String> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Err("The match pattern is empty.".to_string());
+    }
+    let source = match rule {
+        BatchReplaceRule::Glob => format!("(?i)^{}$", glob_to_regex(pattern)),
+        BatchReplaceRule::Regex => format!("(?i)^{pattern}$"),
+        BatchReplaceRule::ExactName | BatchReplaceRule::Index => {
+            return Err("This rule does not use a pattern.".to_string())
+        }
+    };
+    regex::Regex::new(&source).map_err(|err| err.to_string())
+}
+
+/// Translates a glob into a regex fragment. Every `*` becomes a capture group
+/// and every `?` matches a single character; everything else is literal.
+fn glob_to_regex(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() * 2);
+    for ch in pattern.chars() {
+        match ch {
+            '*' => out.push_str("(.*?)"),
+            '?' => out.push_str("(.)"),
+            _ => out.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    out
+}
+
+/// Capture groups of `regex` matched against a file name, with index 0 holding
+/// the whole match. `None` when the name does not match.
+pub(super) fn batch_capture_groups(regex: &regex::Regex, file_name: &str) -> Option<Vec<String>> {
+    let captures = regex.captures(file_name)?;
+    Some(
+        (0..captures.len())
+            .map(|index| {
+                captures
+                    .get(index)
+                    .map_or_else(String::new, |group| group.as_str().to_string())
+            })
+            .collect(),
+    )
+}
+
+/// Expands `{0}`, `{1}`, ... in a template with the capture groups of the
+/// matched source file name. `{0}` is the whole match. Unknown placeholders are
+/// kept verbatim so the user can see what went wrong.
+pub(super) fn expand_batch_template(template: &str, groups: &[String]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '{' {
+            out.push(ch);
+            continue;
+        }
+        let mut digits = String::new();
+        let mut closed = false;
+        while let Some(next) = chars.peek() {
+            if *next == '}' {
+                chars.next();
+                closed = true;
+                break;
+            }
+            if !next.is_ascii_digit() {
+                break;
+            }
+            digits.push(*next);
+            chars.next();
+        }
+        let group = closed
+            .then(|| digits.parse::<usize>().ok())
+            .flatten()
+            .and_then(|position| groups.get(position));
+        if let Some(group) = group {
+            out.push_str(group);
+        } else {
+            out.push('{');
+            out.push_str(&digits);
+            if closed {
+                out.push('}');
+            }
+        }
+    }
+    out
+}
+
+/// Depth and file-count caps for a recursive scan, so that a mistakenly
+/// selected drive root cannot stall the UI.
+const MAX_SCAN_DEPTH: usize = 8;
+const MAX_SCAN_FILES: usize = 20_000;
+
+/// Collects `.dds` files from `dir`, descending into subfolders when
+/// `recursive` is set. Unreadable entries are skipped silently.
+fn collect_dds_files(
+    dir: &std::path::Path,
+    recursive: bool,
+    depth: usize,
+    out: &mut Vec<std::path::PathBuf>,
+) {
+    if out.len() >= MAX_SCAN_FILES || depth > MAX_SCAN_DEPTH {
+        return;
+    }
+    let Ok(read_dir) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<std::path::PathBuf> = read_dir
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    entries.sort();
+    for path in entries {
+        if out.len() >= MAX_SCAN_FILES {
+            return;
+        }
+        if path.is_dir() {
+            if recursive {
+                collect_dds_files(&path, true, depth + 1, out);
+            }
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("dds"))
+        {
+            out.push(path);
+        }
+    }
 }
 
 fn normalize_batch_name(name: &str) -> String {
@@ -289,9 +494,48 @@ impl BatchReplaceEntry {
         matches!(self.status, BatchReplaceStatus::Missing)
     }
 
+    pub(super) const fn is_duplicate(&self) -> bool {
+        matches!(self.status, BatchReplaceStatus::DuplicateSource { .. })
+    }
+
+    /// True when the row has a source but the source failed validation.
+    pub(super) const fn has_error(&self) -> bool {
+        matches!(
+            self.status,
+            BatchReplaceStatus::ReadError(_) | BatchReplaceStatus::ValidationError(_)
+        )
+    }
+
+    /// Matches the row against the free-text search box.
+    pub(super) fn matches_search(&self, needle: &str) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        let needle = needle.to_lowercase();
+        let fields = [
+            self.target_name.as_str(),
+            self.source_name.as_deref().unwrap_or_default(),
+            self.target_source.as_deref().unwrap_or_default(),
+        ];
+        fields
+            .iter()
+            .any(|field| field.to_lowercase().contains(&needle))
+    }
+
+    /// Rows that Apply will attempt: included by the user and with a source.
+    pub(super) const fn is_applicable(&self) -> bool {
+        self.included && self.source_path.is_some()
+    }
+
     pub(super) fn status_label(&self) -> String {
         match &self.status {
-            BatchReplaceStatus::Ready => "Ready".to_string(),
+            BatchReplaceStatus::Ready => {
+                if self.manual {
+                    "Ready · manual".to_string()
+                } else {
+                    "Ready".to_string()
+                }
+            }
             BatchReplaceStatus::Missing => "Not found".to_string(),
             BatchReplaceStatus::DuplicateSource { count } => {
                 format!("Multiple matches ({count})")
@@ -565,6 +809,7 @@ impl AppState {
         self.batch_replace_tab_id = Some(tab_id);
         self.batch_replace_entries.clear();
         self.batch_replace_unused_sources.clear();
+        self.batch_replace_applied.clear();
     }
 
     pub(super) fn total_textures_in_tab(tab: &Tab) -> usize {
@@ -712,31 +957,45 @@ impl AppState {
             return;
         };
 
-        let read_dir = match fs::read_dir(&folder_path) {
-            Ok(read_dir) => read_dir,
-            Err(err) => {
-                self.error_message = Some(err.to_string());
-                return;
-            }
-        };
+        if let Err(err) = fs::read_dir(&folder_path) {
+            self.error_message = Some(err.to_string());
+            return;
+        }
 
-        let mut dds_paths: Vec<std::path::PathBuf> = read_dir
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| {
-                path.extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("dds"))
-            })
-            .collect();
+        let mut dds_paths: Vec<std::path::PathBuf> = Vec::new();
+        collect_dds_files(
+            &folder_path,
+            self.batch_replace_recursive,
+            0,
+            &mut dds_paths,
+        );
         dds_paths.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
 
         if dds_paths.is_empty() {
-            self.error_message =
-                Some("No DDS files were found in the selected replacement folder.".to_string());
+            self.error_message = Some(if self.batch_replace_recursive {
+                "No DDS files were found in the selected folder or its subfolders.".to_string()
+            } else {
+                "No DDS files were found in the selected replacement folder.".to_string()
+            });
             return;
         }
 
         let total = Self::total_textures_in_tab(tab);
+
+        // Pattern rules derive the target name from each source file name, so
+        // the pattern is compiled once per scan and reported on failure.
+        let pattern_regex = if self.batch_replace_rule.is_pattern_based() {
+            match compile_batch_pattern(self.batch_replace_rule, &self.batch_replace_pattern) {
+                Ok(regex) => Some(regex),
+                Err(err) => {
+                    self.error_message = Some(format!("Invalid match pattern: {err}"));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let template = self.batch_replace_template.clone();
 
         // Collect the normalized key of every entry up front so index-hinted
         // source files (Export All suffixes duplicate names with "_<index>")
@@ -746,8 +1005,8 @@ impl AppState {
                 let dds = Self::dds_by_index(tab, index)?;
                 let target_name = dds_export_name(&dds.name, index);
                 let key = match self.batch_replace_rule {
-                    BatchReplaceRule::ExactName => normalize_batch_name(&target_name),
                     BatchReplaceRule::Index => index.to_string(),
+                    _ => normalize_batch_name(&target_name),
                 };
                 Some((index, key))
             })
@@ -755,6 +1014,9 @@ impl AppState {
 
         let mut grouped_paths: HashMap<String, Vec<std::path::PathBuf>> = HashMap::new();
         let mut hinted_paths: HashMap<usize, Vec<std::path::PathBuf>> = HashMap::new();
+        // Sources that the active rule could not map to any target. They are
+        // reported as unused so the user can see what the scan ignored.
+        let mut unmatched_paths: Vec<std::path::PathBuf> = Vec::new();
         for path in dds_paths {
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
@@ -780,8 +1042,25 @@ impl AppState {
                 BatchReplaceRule::Index => {
                     let maybe_key = batch_index_key(file_name).map(|value| value.to_string());
                     let Some(key) = maybe_key else {
+                        unmatched_paths.push(path);
                         continue;
                     };
+                    grouped_paths.entry(key).or_default().push(path);
+                }
+                BatchReplaceRule::Glob | BatchReplaceRule::Regex => {
+                    let Some(regex) = pattern_regex.as_ref() else {
+                        continue;
+                    };
+                    let Some(groups) = batch_capture_groups(regex, file_name) else {
+                        unmatched_paths.push(path);
+                        continue;
+                    };
+                    let derived = expand_batch_template(&template, &groups);
+                    let key = normalize_batch_name(&derived);
+                    if !target_keys.iter().any(|(_, value)| *value == key) {
+                        unmatched_paths.push(path);
+                        continue;
+                    }
                     grouped_paths.entry(key).or_default().push(path);
                 }
             }
@@ -801,8 +1080,8 @@ impl AppState {
             let target_name = dds_export_name(&dds.name, index);
             let target_source = Self::original_filename_in_tab(tab, index);
             let key = match self.batch_replace_rule {
-                BatchReplaceRule::ExactName => normalize_batch_name(&target_name),
                 BatchReplaceRule::Index => index.to_string(),
+                _ => normalize_batch_name(&target_name),
             };
 
             // Index-hinted files take priority over plain name matches so that
@@ -812,7 +1091,9 @@ impl AppState {
                 BatchReplaceRule::ExactName => {
                     hinted_paths.get(&index).map_or_else(Vec::new, Clone::clone)
                 }
-                BatchReplaceRule::Index => Vec::new(),
+                BatchReplaceRule::Index | BatchReplaceRule::Glob | BatchReplaceRule::Regex => {
+                    Vec::new()
+                }
             };
             let candidates = if candidates.is_empty() {
                 grouped_paths.get(&key).map_or_else(Vec::new, Clone::clone)
@@ -828,6 +1109,9 @@ impl AppState {
                 source_name: None,
                 source_size: None,
                 source_path: None,
+                candidates: candidates.clone(),
+                included: false,
+                manual: false,
                 status: BatchReplaceStatus::Missing,
                 prepared: None,
             };
@@ -838,6 +1122,7 @@ impl AppState {
                 };
             } else if let Some(path) = candidates.first() {
                 used_sources.insert(path.clone());
+                entry.included = true;
                 entry.source_name = Some(
                     path.file_name()
                         .and_then(|name| name.to_str())
@@ -880,19 +1165,289 @@ impl AppState {
             .values()
             .chain(hinted_paths.values())
             .flat_map(|paths| paths.iter())
+            .chain(unmatched_paths.iter())
             .filter(|path| !used_sources.contains(*path))
-            .filter_map(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_string)
+            .map(|path| {
+                path.strip_prefix(&folder_path)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string()
             })
             .collect();
         unused_sources.sort();
+        unused_sources.dedup();
 
         self.batch_replace_entries = entries;
         self.batch_replace_unused_sources = unused_sources;
         self.error_message = None;
         self.log("Scanned batch replace folder.");
+    }
+
+    /// Writes the current mapping to a plain-text preset file so the same set
+    /// of assignments can be reused on another file later.
+    pub(super) fn save_batch_preset(&mut self, path: &std::path::Path) {
+        let folder = self.batch_replace_folder.clone();
+        let mut out = String::from("# TEXembed batch mapping v1\n");
+        out.push_str("# index\ttarget name\tsource path\n");
+        for entry in &self.batch_replace_entries {
+            let Some(source) = entry.source_path.as_ref() else {
+                continue;
+            };
+            let source = match folder
+                .as_ref()
+                .and_then(|root| source.strip_prefix(root).ok())
+            {
+                Some(relative) => relative.display().to_string(),
+                None => source.display().to_string(),
+            };
+            let _ = writeln!(
+                out,
+                "{}\t{}\t{}",
+                entry.target_index, entry.target_name, source
+            );
+        }
+
+        match fs::write(path, out) {
+            Ok(()) => {
+                self.log(&format!("Saved batch preset: {}", path.display()));
+                self.error_message = None;
+            }
+            Err(err) => self.error_message = Some(err.to_string()),
+        }
+    }
+
+    /// Applies a preset written by [`Self::save_batch_preset`]. Rows are matched
+    /// by target index and name, and every source is re-validated, so a preset
+    /// from a different file only fills in the rows that still line up.
+    pub(super) fn load_batch_preset(&mut self, path: &std::path::Path) {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) => {
+                self.error_message = Some(err.to_string());
+                return;
+            }
+        };
+        let folder = self.batch_replace_folder.clone();
+
+        let mut applied = 0;
+        let mut skipped = 0;
+        for line in text.lines() {
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut fields = line.splitn(3, '\t');
+            let (Some(index), Some(target_name), Some(source)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                skipped += 1;
+                continue;
+            };
+            let Some(index) = index.trim().parse::<usize>().ok() else {
+                skipped += 1;
+                continue;
+            };
+            let known = self.batch_replace_entries.iter().any(|entry| {
+                entry.target_index == index && entry.target_name == target_name.trim()
+            });
+            if !known {
+                skipped += 1;
+                continue;
+            }
+
+            let source = std::path::PathBuf::from(source.trim());
+            let source = if source.is_absolute() {
+                source
+            } else if let Some(root) = folder.as_ref() {
+                root.join(source)
+            } else {
+                skipped += 1;
+                continue;
+            };
+            self.assign_batch_source(index, source);
+            applied += 1;
+        }
+
+        if applied == 0 {
+            self.error_message = Some(
+                "No preset entries matched the scanned textures. Scan the folder first."
+                    .to_string(),
+            );
+        } else {
+            self.log(&format!(
+                "Applied {applied} preset entr(ies), skipped {skipped}."
+            ));
+        }
+    }
+
+    /// Reverts every texture the last batch apply touched.
+    pub(super) fn undo_last_batch_replace(&mut self) {
+        let Some(tab_id) = self.batch_replace_tab_id else {
+            return;
+        };
+        let indices = std::mem::take(&mut self.batch_replace_applied);
+        if indices.is_empty() {
+            return;
+        }
+        let mut reverted = 0;
+        if let Some(tab) = self.tab_mut_by_id(tab_id) {
+            for index in &indices {
+                if let Some(backup) = tab.replace_backups.remove(index) {
+                    if let Some(entry) = Self::dds_by_index_mut(tab, *index) {
+                        *entry = backup;
+                    }
+                    reverted += 1;
+                }
+            }
+            tab.has_unsaved_changes = !tab.replace_backups.is_empty();
+        }
+        for index in indices {
+            self.invalidate_preview(tab_id, index);
+        }
+        self.log(&format!("Undid {reverted} batch replacement(s)."));
+        self.error_message = None;
+    }
+
+    /// Assigns a DDS file to a single batch row and re-validates it against the
+    /// current replace options. Used by the per-row Assign button, the
+    /// multiple-match picker, and drag & drop.
+    pub(super) fn assign_batch_source(&mut self, target_index: usize, path: std::path::PathBuf) {
+        let Some(tab_id) = self.batch_replace_tab_id else {
+            return;
+        };
+        let Some(tab) = self.tab_by_id(tab_id) else {
+            return;
+        };
+        let (Some(dds), Some(file_type)) = (
+            Self::dds_by_index(tab, target_index).cloned(),
+            Self::file_type_by_index_cloned(tab, target_index),
+        ) else {
+            return;
+        };
+
+        let patch_header = self.patch_header_on_replace;
+        let streamtex_allow_resize = self.streamtex_allow_resize;
+        let resize_on_replace = self.resize_on_replace;
+
+        let source_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map_or_else(|| path.display().to_string(), str::to_string);
+        let mut source_size = None;
+        let (status, prepared) = match fs::read(&path) {
+            Ok(bytes) => {
+                source_size = parse_dds_header(&bytes)
+                    .ok()
+                    .map(|(width, height, _, _)| format!("{width}x{height}"));
+                match Self::prepare_replacement_dds(
+                    &file_type,
+                    &dds,
+                    &bytes,
+                    patch_header,
+                    streamtex_allow_resize,
+                    resize_on_replace,
+                ) {
+                    Ok(value) => (BatchReplaceStatus::Ready, Some(value)),
+                    Err(err) => (BatchReplaceStatus::ValidationError(err), None),
+                }
+            }
+            Err(err) => (BatchReplaceStatus::ReadError(err.to_string()), None),
+        };
+
+        if let Some(entry) = self
+            .batch_replace_entries
+            .iter_mut()
+            .find(|entry| entry.target_index == target_index)
+        {
+            entry.source_name = Some(source_name);
+            entry.source_size = source_size;
+            entry.source_path = Some(path);
+            entry.included = true;
+            entry.manual = true;
+            entry.status = status;
+            entry.prepared = prepared;
+        }
+        self.error_message = None;
+    }
+
+    /// Detaches the source of a single batch row, keeping the scan candidates
+    /// so the user can pick another one.
+    pub(super) fn clear_batch_source(&mut self, target_index: usize) {
+        let Some(entry) = self
+            .batch_replace_entries
+            .iter_mut()
+            .find(|entry| entry.target_index == target_index)
+        else {
+            return;
+        };
+        entry.source_name = None;
+        entry.source_size = None;
+        entry.source_path = None;
+        entry.prepared = None;
+        entry.included = false;
+        entry.manual = false;
+        entry.status = if entry.candidates.len() > 1 {
+            BatchReplaceStatus::DuplicateSource {
+                count: entry.candidates.len(),
+            }
+        } else {
+            BatchReplaceStatus::Missing
+        };
+    }
+
+    /// Resolves the rows that matched several files when one of the candidates
+    /// is unambiguous: an index-suffixed file (`name_<index>.dds`) matching the
+    /// row, or a single still-unused candidate.
+    pub(super) fn auto_fix_batch_duplicates(&mut self) {
+        let mut used: HashSet<std::path::PathBuf> = self
+            .batch_replace_entries
+            .iter()
+            .filter_map(|entry| entry.source_path.clone())
+            .collect();
+
+        let mut fixes: Vec<(usize, std::path::PathBuf)> = Vec::new();
+        for entry in &self.batch_replace_entries {
+            if !entry.is_duplicate() {
+                continue;
+            }
+            let hinted = entry.candidates.iter().find(|path| {
+                let Some(stem) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+                    return false;
+                };
+                let stem = stem.to_ascii_lowercase();
+                split_batch_hint(&stem).map(|(_, index)| index) == Some(entry.target_index)
+                    && !used.contains(*path)
+            });
+            let choice = if let Some(path) = hinted {
+                Some((*path).clone())
+            } else {
+                let free: Vec<&std::path::PathBuf> = entry
+                    .candidates
+                    .iter()
+                    .filter(|path| !used.contains(*path))
+                    .collect();
+                if free.len() == 1 {
+                    Some(free[0].clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(path) = choice {
+                used.insert(path.clone());
+                fixes.push((entry.target_index, path));
+            }
+        }
+
+        let fixed = fixes.len();
+        for (index, path) in fixes {
+            self.assign_batch_source(index, path);
+        }
+
+        if fixed == 0 {
+            self.log("No duplicate matches could be resolved automatically.");
+        } else {
+            self.log(&format!("Auto-assigned {fixed} duplicate match(es)."));
+        }
     }
 
     pub(super) fn apply_batch_replace(&mut self) {
@@ -909,6 +1464,7 @@ impl AppState {
         let sources: Vec<(usize, std::path::PathBuf)> = self
             .batch_replace_entries
             .iter()
+            .filter(|entry| entry.included)
             .filter_map(|entry| {
                 entry
                     .source_path
@@ -982,9 +1538,10 @@ impl AppState {
             }
         }
 
-        for index in refreshed_indices {
-            self.invalidate_preview(tab_id, index);
+        for index in &refreshed_indices {
+            self.invalidate_preview(tab_id, *index);
         }
+        self.batch_replace_applied = refreshed_indices;
 
         for note in notes {
             self.log(&note);
@@ -2147,6 +2704,189 @@ mod tests {
         assert!(tab.file.dds_list[0].modified);
         assert_eq!(tab.file.dds_list[0].width, 16);
         assert_eq!(tab.file.dds_list[0].bytes[128], 0x12);
+    }
+
+    #[test]
+    fn batch_duplicate_matches_are_excluded_until_resolved_and_apply_respects_inclusion() {
+        let folder = TempFolder::new();
+        fs::write(folder.0.join("0.dds"), make_dxt1_dds(8, 8, 1)).unwrap();
+        fs::write(folder.0.join("texture_0.dds"), make_dxt1_dds(8, 8, 1)).unwrap();
+        let mut state = AppState {
+            batch_replace_rule: BatchReplaceRule::Index,
+            batch_replace_folder: Some(folder.0.clone()),
+            ..Default::default()
+        };
+        state.load_file(test_file("batch.textures", 1));
+        state.batch_replace_tab_id = state.active_tab_id;
+        state.scan_batch_replace();
+
+        let entry = &state.batch_replace_entries[0];
+        assert!(entry.is_duplicate());
+        assert_eq!(entry.candidates.len(), 2);
+        assert!(!entry.included);
+        assert!(!entry.is_applicable());
+
+        // An unresolved row must never be applied, even though it has candidates.
+        state.apply_batch_replace();
+        assert!(!state.active_tab().unwrap().has_unsaved_changes);
+
+        state.auto_fix_batch_duplicates();
+        let entry = &state.batch_replace_entries[0];
+        assert!(entry.is_ready());
+        assert!(entry.included);
+        assert!(entry.manual);
+        assert!(entry.is_applicable());
+        assert_eq!(
+            entry.source_path.as_ref().unwrap().file_name().unwrap(),
+            "texture_0.dds"
+        );
+
+        state.clear_batch_source(0);
+        let entry = &state.batch_replace_entries[0];
+        assert!(entry.is_duplicate());
+        assert!(!entry.included);
+        assert!(entry.source_path.is_none());
+    }
+
+    #[test]
+    fn batch_manual_assignment_validates_the_file_and_marks_the_row_ready() {
+        let folder = TempFolder::new();
+        let replacement = folder.0.join("anything.dds");
+        fs::write(&replacement, make_dxt1_dds(8, 8, 1)).unwrap();
+        let mut state = AppState {
+            batch_replace_folder: Some(folder.0.clone()),
+            ..Default::default()
+        };
+        state.load_file(test_file("batch.textures", 1));
+        state.batch_replace_tab_id = state.active_tab_id;
+        state.scan_batch_replace();
+        assert!(state.batch_replace_entries[0].is_missing());
+        assert!(!state.batch_replace_entries[0].included);
+
+        state.assign_batch_source(0, replacement.clone());
+        let entry = &state.batch_replace_entries[0];
+        assert!(entry.is_ready());
+        assert!(entry.manual);
+        assert!(entry.included);
+        assert_eq!(entry.source_name.as_deref(), Some("anything.dds"));
+
+        state.assign_batch_source(0, folder.0.join("missing.dds"));
+        let entry = &state.batch_replace_entries[0];
+        assert!(matches!(entry.status, BatchReplaceStatus::ReadError(_)));
+        assert!(!entry.is_ready());
+    }
+
+    #[test]
+    fn batch_glob_rule_derives_the_target_name_from_the_pattern() {
+        let folder = TempFolder::new();
+        fs::write(folder.0.join("orig_d.dds"), make_dxt1_dds(8, 8, 1)).unwrap();
+        fs::write(folder.0.join("unrelated.dds"), make_dxt1_dds(8, 8, 1)).unwrap();
+        let mut state = AppState {
+            batch_replace_rule: BatchReplaceRule::Glob,
+            batch_replace_pattern: "*_d.dds".to_string(),
+            batch_replace_template: "{1}".to_string(),
+            batch_replace_folder: Some(folder.0.clone()),
+            ..Default::default()
+        };
+        state.load_file(test_file("batch.textures", 1));
+        state.batch_replace_tab_id = state.active_tab_id;
+        state.scan_batch_replace();
+
+        let entry = &state.batch_replace_entries[0];
+        assert!(entry.is_ready());
+        assert_eq!(entry.source_name.as_deref(), Some("orig_d.dds"));
+        // A file the pattern cannot map to any texture is reported, not applied.
+        assert_eq!(
+            state.batch_replace_unused_sources,
+            vec!["unrelated.dds".to_string()]
+        );
+    }
+
+    #[test]
+    fn batch_regex_rule_supports_capture_groups() {
+        let folder = TempFolder::new();
+        fs::write(folder.0.join("orig_diffuse.dds"), make_dxt1_dds(8, 8, 1)).unwrap();
+        let mut state = AppState {
+            batch_replace_rule: BatchReplaceRule::Regex,
+            batch_replace_pattern: r"^(.+)_diffuse\.dds$".to_string(),
+            batch_replace_template: "{1}".to_string(),
+            batch_replace_folder: Some(folder.0.clone()),
+            ..Default::default()
+        };
+        state.load_file(test_file("batch.textures", 1));
+        state.batch_replace_tab_id = state.active_tab_id;
+        state.scan_batch_replace();
+        assert!(state.batch_replace_entries[0].is_ready());
+
+        // A broken pattern is reported instead of silently matching nothing.
+        state.batch_replace_pattern = "(".to_string();
+        state.scan_batch_replace();
+        assert!(state
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Invalid match pattern")));
+    }
+
+    #[test]
+    fn batch_scan_can_include_subfolders() {
+        let folder = TempFolder::new();
+        let nested = folder.0.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("orig.dds"), make_dxt1_dds(8, 8, 1)).unwrap();
+        let mut state = AppState {
+            batch_replace_folder: Some(folder.0.clone()),
+            ..Default::default()
+        };
+        state.load_file(test_file("batch.textures", 1));
+        state.batch_replace_tab_id = state.active_tab_id;
+
+        state.scan_batch_replace();
+        // Without recursion the nested file is invisible, so nothing is scanned.
+        assert!(state.batch_replace_entries.is_empty());
+
+        state.batch_replace_recursive = true;
+        state.scan_batch_replace();
+        let entry = &state.batch_replace_entries[0];
+        assert!(entry.is_ready());
+        assert_eq!(entry.source_name.as_deref(), Some("orig.dds"));
+    }
+
+    #[test]
+    fn batch_preset_round_trips_the_mapping_and_undo_reverts_the_batch() {
+        let folder = TempFolder::new();
+        let source = folder.0.join("orig.dds");
+        let mut bytes = make_dxt1_dds(8, 8, 1);
+        bytes[128] = 0x5A;
+        fs::write(&source, &bytes).unwrap();
+        let mut state = AppState {
+            batch_replace_folder: Some(folder.0.clone()),
+            ..Default::default()
+        };
+        state.load_file(test_file("batch.textures", 1));
+        state.batch_replace_tab_id = state.active_tab_id;
+        state.scan_batch_replace();
+        assert!(state.batch_replace_entries[0].is_ready());
+
+        let preset = folder.0.join("mapping.txt");
+        state.save_batch_preset(&preset);
+        let text = fs::read_to_string(&preset).unwrap();
+        assert!(text.contains("orig.dds"));
+
+        // Dropping the assignment and reloading the preset restores it.
+        state.clear_batch_source(0);
+        assert!(state.batch_replace_entries[0].is_missing());
+        state.load_batch_preset(&preset);
+        assert!(state.batch_replace_entries[0].is_ready());
+
+        state.apply_batch_replace();
+        assert!(state.active_tab().unwrap().file.dds_list[0].modified);
+        assert_eq!(state.batch_replace_applied, vec![0]);
+
+        state.undo_last_batch_replace();
+        let tab = state.active_tab().unwrap();
+        assert!(!tab.file.dds_list[0].modified);
+        assert!(!tab.has_unsaved_changes);
+        assert!(state.batch_replace_applied.is_empty());
     }
 
     #[test]

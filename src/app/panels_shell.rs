@@ -3,12 +3,12 @@ use std::fmt::Write as _;
 use super::constants::{
     COLOR_ACCENT_ORANGE, COLOR_ACCENT_RED, COLOR_BG, COLOR_BTN_BLUE, COLOR_CARD,
     COLOR_GRAD_BLUE_BOTTOM, COLOR_GRAD_GRAY_BOTTOM, COLOR_GRAD_ORANGE_BOTTOM, COLOR_LABEL_BLUE,
-    COLOR_PANEL, COLOR_PRIMARY_GLOW, COLOR_PRIMARY_TRANSLUCENT, COLOR_RAIL_HOVER,
+    COLOR_PANEL, COLOR_PREVIEW_BG, COLOR_PRIMARY_GLOW, COLOR_PRIMARY_TRANSLUCENT, COLOR_RAIL_HOVER,
     COLOR_RAIL_SEPARATOR, COLOR_TAB_ACTIVE, COLOR_TAB_INACTIVE, COLOR_TEXT, COLOR_TEXT_SECONDARY,
     LEFT_PANEL_WIDTH,
 };
-use super::state::{AppState, BatchReplaceRule};
-use super::widgets::gradient_button;
+use super::state::{compile_batch_pattern, AppState, BatchFilter, BatchReplaceRule, PreviewState};
+use super::widgets::{gradient_button, paint_checkerboard, paint_texture_fitted};
 use eframe::egui;
 use egui::{Color32, CursorIcon, FontFamily, FontId, Pos2, Rect, Sense, TextureHandle, Vec2};
 use rfd::FileDialog;
@@ -389,6 +389,35 @@ fn draw_multi_open_dialog(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
+/// Deferred action produced while rendering a batch replace row. The rows are
+/// drawn from an immutable borrow of `AppState`, so every interaction is
+/// recorded here and applied once the loop is finished.
+enum BatchRowAction {
+    Focus(usize),
+    Toggle(usize, bool),
+    Clear(usize),
+    Assign(usize),
+    AssignPath(usize, std::path::PathBuf),
+}
+
+/// Compact toolbar button used inside the batch replace dialog.
+fn small_tool_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Response {
+    let button = egui::Button::new(
+        egui::RichText::new(text)
+            .color(if enabled {
+                COLOR_TEXT
+            } else {
+                COLOR_TEXT_SECONDARY
+            })
+            .size(12.0),
+    )
+    .fill(COLOR_CARD)
+    .stroke(egui::Stroke::new(1.0_f32, COLOR_RAIL_SEPARATOR))
+    .rounding(egui::Rounding::same(4.0));
+    ui.add_enabled(enabled, button)
+        .on_hover_cursor(CursorIcon::PointingHand)
+}
+
 #[allow(clippy::too_many_lines)]
 fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
     if !state.show_batch_replace_dialog {
@@ -424,6 +453,21 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
         .batch_replace_entries
         .len()
         .saturating_sub(ready_count + missing_count);
+    let included_count = state
+        .batch_replace_entries
+        .iter()
+        .filter(|entry| entry.included)
+        .count();
+    let applicable_count = state
+        .batch_replace_entries
+        .iter()
+        .filter(|entry| entry.is_applicable())
+        .count();
+    let duplicate_count = state
+        .batch_replace_entries
+        .iter()
+        .filter(|entry| entry.is_duplicate())
+        .count();
 
     let mut show = true;
     egui::Window::new("batch_replace_dialog")
@@ -431,11 +475,11 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
         .resizable(true)
         .title_bar(false)
         .default_width(560.0)
-        .default_height(520.0)
+        .default_height(600.0)
         .min_width(480.0)
         .min_height(360.0)
         .max_width(620.0)
-        .max_height(760.0)
+        .max_height(840.0)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .frame(
             egui::Frame::none()
@@ -510,36 +554,129 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                 }
             });
 
-            ui.add_space(12.0);
-            ui.label(egui::RichText::new("Matching rule").color(COLOR_TEXT));
-            ui.add_space(6.0);
-            let previous_rule = state.batch_replace_rule;
-            ui.radio_value(
-                &mut state.batch_replace_rule,
-                BatchReplaceRule::ExactName,
-                "Exact name (recommended)",
-            );
-            ui.radio_value(
-                &mut state.batch_replace_rule,
-                BatchReplaceRule::Index,
-                "Index (0.dds or texture_0.dds)",
-            );
-            // Changing the matching rule invalidates the previous scan: the
-            // entries would otherwise keep the matches computed with the old
-            // rule.
-            if state.batch_replace_rule != previous_rule {
-                state.batch_replace_entries.clear();
-                state.batch_replace_unused_sources.clear();
-            }
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("Match options")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Matching rule").color(COLOR_TEXT));
+                    ui.add_space(6.0);
+                    let previous_rule = state.batch_replace_rule;
+                    ui.radio_value(
+                        &mut state.batch_replace_rule,
+                        BatchReplaceRule::ExactName,
+                        "Exact name (recommended)",
+                    );
+                    ui.radio_value(
+                        &mut state.batch_replace_rule,
+                        BatchReplaceRule::Index,
+                        "Index (0.dds or texture_0.dds)",
+                    );
+                    ui.radio_value(
+                        &mut state.batch_replace_rule,
+                        BatchReplaceRule::Glob,
+                        "Glob pattern (tyre_d.dds -> tyre.dds)",
+                    );
+                    ui.radio_value(
+                        &mut state.batch_replace_rule,
+                        BatchReplaceRule::Regex,
+                        "Regular expression with groups",
+                    );
+                    // Changing the matching rule invalidates the previous scan: the
+                    // entries would otherwise keep the matches computed with the old
+                    // rule.
+                    if state.batch_replace_rule != previous_rule {
+                        state.batch_replace_entries.clear();
+                        state.batch_replace_unused_sources.clear();
+                    }
 
-            ui.add_space(10.0);
-            ui.checkbox(
-                &mut state.patch_header_on_replace,
-                "Allow different compression (patch .textures header)",
-            )
-            .on_hover_text(
-                "When enabled, replacing a texture with a different compression format is allowed for .textures files; the catalog sizes and records are patched automatically on save. Size and mip count must still match.",
-            );
+                    if state.batch_replace_rule.is_pattern_based() {
+                        ui.add_space(8.0);
+                        let bullet = if state.batch_replace_rule == BatchReplaceRule::Glob {
+                            "Use * for any text and ? for one character. Each * becomes a group."
+                        } else {
+                            "Groups are referenced with {1}, {2}, ... and {0} is the whole match."
+                        };
+                        ui.label(
+                            egui::RichText::new(bullet)
+                                .color(COLOR_TEXT_SECONDARY)
+                                .size(11.0),
+                        );
+                        ui.add_space(6.0);
+                        let field_width = (ui.available_width() - 90.0).max(120.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Pattern")
+                                    .color(COLOR_TEXT_SECONDARY)
+                                    .size(12.0),
+                            );
+                            let changed = ui
+                                .add_sized(
+                                    Vec2::new(field_width, 24.0),
+                                    egui::TextEdit::singleline(&mut state.batch_replace_pattern)
+                                        .font(egui::TextStyle::Monospace)
+                                        .hint_text("*_d.dds"),
+                                )
+                                .changed();
+                            if changed {
+                                state.batch_replace_entries.clear();
+                                state.batch_replace_unused_sources.clear();
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Target name")
+                                    .color(COLOR_TEXT_SECONDARY)
+                                    .size(12.0),
+                            );
+                            let changed = ui
+                                .add_sized(
+                                    Vec2::new(field_width, 24.0),
+                                    egui::TextEdit::singleline(&mut state.batch_replace_template)
+                                        .font(egui::TextStyle::Monospace)
+                                        .hint_text("{1}"),
+                                )
+                                .changed();
+                            if changed {
+                                state.batch_replace_entries.clear();
+                                state.batch_replace_unused_sources.clear();
+                            }
+                        });
+                        ui.add_space(4.0);
+                        match compile_batch_pattern(
+                            state.batch_replace_rule,
+                            &state.batch_replace_pattern,
+                        ) {
+                            Ok(_) => {
+                                ui.label(
+                                    egui::RichText::new("Pattern is valid")
+                                        .color(COLOR_LABEL_BLUE)
+                                        .size(11.0),
+                                );
+                            }
+                            Err(err) => {
+                                ui.label(
+                                    egui::RichText::new(format!("Invalid pattern: {err}"))
+                                        .color(COLOR_ACCENT_ORANGE)
+                                        .size(11.0),
+                                );
+                            }
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut state.batch_replace_recursive, "Include subfolders")
+                        .on_hover_text("Scan every subfolder of the replacement folder for DDS files.");
+
+                    ui.add_space(10.0);
+                    ui.checkbox(
+                        &mut state.patch_header_on_replace,
+                        "Allow different compression (patch .textures header)",
+                    )
+                    .on_hover_text(
+                        "When enabled, replacing a texture with a different compression format is allowed for .textures files; the catalog sizes and records are patched automatically on save. Size and mip count must still match.",
+                    );
+                });
 
             ui.add_space(14.0);
             ui.horizontal(|ui| {
@@ -556,14 +693,18 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                 }
                 if gradient_button(
                     ui,
-                    ready_count > 0,
-                    &format!("Apply Matched ({ready_count})"),
-                    Vec2::new(150.0, 28.0),
+                    applicable_count > 0,
+                    &format!("Apply ({applicable_count})"),
+                    Vec2::new(130.0, 28.0),
                     COLOR_GRAD_ORANGE_BOTTOM,
                 )
                 .clicked()
                 {
                     state.apply_batch_replace();
+                }
+                let undo_enabled = !state.batch_replace_applied.is_empty();
+                if small_tool_button(ui, undo_enabled, "Undo last batch").clicked() && undo_enabled {
+                    state.undo_last_batch_replace();
                 }
             });
 
@@ -578,7 +719,47 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                 return;
             }
 
+            ui.horizontal_wrapped(|ui| {
+                if small_tool_button(ui, true, "Include all").clicked() {
+                    for entry in &mut state.batch_replace_entries {
+                        if entry.source_path.is_some() {
+                            entry.included = true;
+                        }
+                    }
+                }
+                if small_tool_button(ui, true, "Include none").clicked() {
+                    for entry in &mut state.batch_replace_entries {
+                        entry.included = false;
+                    }
+                }
+                if small_tool_button(
+                    ui,
+                    true,
+                    &format!("Resolve duplicates ({duplicate_count})"),
+                )
+                .clicked()
+                {
+                    state.auto_fix_batch_duplicates();
+                }
+                if small_tool_button(ui, true, "Clear all sources").clicked() {
+                    let indices: Vec<usize> = state
+                        .batch_replace_entries
+                        .iter()
+                        .map(|entry| entry.target_index)
+                        .collect();
+                    for index in indices {
+                        state.clear_batch_source(index);
+                    }
+                }
+            });
+
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Included: {included_count}"))
+                        .color(COLOR_TEXT)
+                        .strong(),
+                );
                 ui.label(
                     egui::RichText::new(format!("Ready: {ready_count}"))
                         .color(COLOR_LABEL_BLUE)
@@ -601,13 +782,112 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                 );
             });
 
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                let mut next_filter = state.batch_replace_filter;
+                for filter in [
+                    BatchFilter::All,
+                    BatchFilter::Ready,
+                    BatchFilter::Missing,
+                    BatchFilter::Conflicts,
+                    BatchFilter::Excluded,
+                    BatchFilter::Unused,
+                ] {
+                    let count = if filter == BatchFilter::Unused {
+                        state.batch_replace_unused_sources.len()
+                    } else {
+                        filter.count(&state.batch_replace_entries)
+                    };
+                    let selected = state.batch_replace_filter == filter;
+                    let label = format!("{} ({count})", filter.label());
+                    let text = egui::RichText::new(label)
+                        .size(11.0)
+                        .color(if selected { COLOR_TEXT } else { COLOR_TEXT_SECONDARY });
+                    let button = egui::Button::new(text)
+                        .fill(if selected {
+                            COLOR_TAB_ACTIVE
+                        } else {
+                            COLOR_PANEL
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            if selected {
+                                COLOR_LABEL_BLUE
+                            } else {
+                                COLOR_RAIL_SEPARATOR
+                            },
+                        ))
+                        .rounding(egui::Rounding::same(10.0));
+                    if ui.add(button).clicked() {
+                        next_filter = filter;
+                    }
+                }
+                state.batch_replace_filter = next_filter;
+
+                ui.add_space(6.0);
+                ui.add_sized(
+                    Vec2::new(160.0, 22.0),
+                    egui::TextEdit::singleline(&mut state.batch_replace_search)
+                        .hint_text("Search name")
+                        .font(egui::TextStyle::Small),
+                );
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if small_tool_button(ui, true, "Save preset...").clicked() {
+                    if let Some(path) = FileDialog::new()
+                        .add_filter("Batch preset", &["txt"])
+                        .set_file_name("batch-mapping.txt")
+                        .save_file()
+                    {
+                        state.save_batch_preset(&path);
+                    }
+                }
+                if small_tool_button(ui, true, "Load preset...").clicked() {
+                    if let Some(path) = FileDialog::new()
+                        .add_filter("Batch preset", &["txt"])
+                        .pick_file()
+                    {
+                        state.load_batch_preset(&path);
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Tick a row to include it, use Change to pick a different DDS, or drop a file onto a row.",
+                    )
+                    .color(COLOR_TEXT_SECONDARY)
+                    .size(11.0),
+                );
+            });
+
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(8.0);
 
-            let mut clicked_target = None;
+            let dropped_path = ctx.input(|input| {
+                input.raw.dropped_files.iter().find_map(|file| {
+                    let path = file.path.as_ref()?;
+                    path.extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("dds"))
+                        .then(|| path.clone())
+                })
+            });
+            let is_dragging_file = ctx.input(|input| !input.raw.hovered_files.is_empty());
+
+            let mut row_action = None;
+            let mut hovered_row = None;
+            let mut rows_to_enqueue: Vec<usize> = Vec::new();
+            let show_rows = state.batch_replace_filter != BatchFilter::Unused;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for entry in &state.batch_replace_entries {
+                    if !show_rows
+                        || !state.batch_replace_filter.shows_row(entry)
+                        || !entry.matches_search(&state.batch_replace_search)
+                    {
+                        continue;
+                    }
                     let source_label = entry.source_name.as_deref().unwrap_or("-");
                     let source_size_label = entry
                         .source_size
@@ -621,19 +901,61 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                         COLOR_ACCENT_ORANGE
                     };
 
-                    egui::Frame::none()
+                    let frame = egui::Frame::none()
                         .fill(COLOR_CARD)
                         .rounding(egui::Rounding::same(4.0))
                         .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                         .show(ui, |ui| {
                             let row_width = ui.available_width();
-                            let status_column_width = 110.0;
+                            const THUMB: f32 = 46.0;
+                            let control_column_width = 190.0;
                             let text_column_width =
-                                (row_width - status_column_width).max(100.0);
+                                (row_width - control_column_width - THUMB - 40.0).max(100.0);
 
                             let response = ui
                                 .horizontal(|ui| {
                                     ui.set_width(row_width);
+                                    let mut included = entry.included;
+                                    if ui
+                                        .checkbox(&mut included, "")
+                                        .on_hover_text("Include this row when applying")
+                                        .changed()
+                                    {
+                                        row_action = Some(BatchRowAction::Toggle(
+                                            entry.target_index,
+                                            included,
+                                        ));
+                                    }
+
+                                    let (thumb_rect, _) = ui.allocate_exact_size(
+                                        Vec2::splat(THUMB),
+                                        Sense::hover(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        thumb_rect,
+                                        egui::Rounding::same(4.0),
+                                        COLOR_PREVIEW_BG,
+                                    );
+                                    if ui.is_rect_visible(thumb_rect) {
+                                        rows_to_enqueue.push(entry.target_index);
+                                        let content = thumb_rect.shrink(2.0);
+                                        if state.show_transparency_bg {
+                                            paint_checkerboard(
+                                                ui,
+                                                content,
+                                                8.0,
+                                                Color32::from_rgb(38, 38, 42),
+                                                Color32::from_rgb(26, 26, 30),
+                                            );
+                                        }
+                                        if let Some(PreviewState::Ready(texture)) = state
+                                            .previews
+                                            .get(&(tab_id, entry.target_index))
+                                        {
+                                            paint_texture_fitted(ui, content, texture);
+                                        }
+                                    }
+
                                     ui.allocate_ui_with_layout(
                                         Vec2::new(text_column_width, 0.0),
                                         egui::Layout::top_down(egui::Align::LEFT),
@@ -704,20 +1026,91 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                                             );
                                             if let Some(path) = &entry.source_path {
                                                 status.on_hover_text(path.display().to_string());
+                                            } else {
+                                                status.on_hover_text(
+                                                    "Click the row to focus it in the grid",
+                                                );
+                                            }
+                                            if entry.source_path.is_some()
+                                                && small_tool_button(ui, true, "Clear").clicked()
+                                            {
+                                                row_action = Some(BatchRowAction::Clear(
+                                                    entry.target_index,
+                                                ));
+                                            }
+                                            if small_tool_button(ui, true, "Change")
+                                                .on_hover_text("Choose a different DDS file")
+                                                .clicked()
+                                            {
+                                                row_action =
+                                                    Some(BatchRowAction::Assign(entry.target_index));
+                                            }
+                                            if entry.candidates.len() > 1 {
+                                                let selected_label =
+                                                    format!("Pick ({})", entry.candidates.len());
+                                                egui::ComboBox::from_id_salt((
+                                                    "batch_pick",
+                                                    entry.target_index,
+                                                ))
+                                                .selected_text(
+                                                    egui::RichText::new(selected_label)
+                                                        .size(12.0),
+                                                )
+                                                .width(120.0)
+                                                .show_ui(ui, |ui| {
+                                                    for candidate in &entry.candidates {
+                                                        let label = candidate
+                                                            .file_name()
+                                                            .and_then(|name| name.to_str())
+                                                            .map_or_else(
+                                                                || candidate.display().to_string(),
+                                                                str::to_string,
+                                                            );
+                                                        let selected = entry.source_path.as_ref()
+                                                            == Some(candidate);
+                                                        if ui
+                                                            .selectable_label(selected, label)
+                                                            .clicked()
+                                                        {
+                                                            row_action =
+                                                                Some(BatchRowAction::AssignPath(
+                                                                    entry.target_index,
+                                                                    candidate.clone(),
+                                                                ));
+                                                        }
+                                                    }
+                                                });
                                             }
                                         },
                                     );
                                 })
                                 .response
                                 .interact(Sense::click());
-                            if response.clicked() {
-                                clicked_target = Some(entry.target_index);
-                            }
-                        });
+                            (response, entry.target_index)
+                        })
+                        .inner;
+                    let (response, target_index) = frame;
+                    if response.hovered() {
+                        hovered_row = Some(target_index);
+                    }
+                    if response.clicked() {
+                        row_action = Some(BatchRowAction::Focus(target_index));
+                    }
+                    if is_dragging_file {
+                        ui.painter().rect_stroke(
+                            response.rect,
+                            egui::Rounding::same(4.0),
+                            egui::Stroke::new(2.0_f32, COLOR_LABEL_BLUE),
+                        );
+                    }
                     ui.add_space(4.0);
                 }
 
-                if !state.batch_replace_unused_sources.is_empty() {
+                let list_unused = matches!(
+                    state.batch_replace_filter,
+                    BatchFilter::All | BatchFilter::Unused
+                );
+                if list_unused && !state.batch_replace_unused_sources.is_empty() {
                     ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new("Unused DDS files")
@@ -737,11 +1130,47 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                 }
             });
 
-            if let Some(index) = clicked_target {
-                state.active_tab_id = Some(tab_id);
-                if let Some(tab) = state.tab_mut_by_id(tab_id) {
-                    tab.selected_index = Some(index);
+            // Only the rows that were actually on screen requested a thumbnail,
+            // so a long list never floods the preview queue.
+            for index in rows_to_enqueue {
+                state.enqueue_preview_load(tab_id, index);
+            }
+
+            if let Some(path) = dropped_path {
+                if let Some(index) = hovered_row {
+                    state.assign_batch_source(index, path);
                 }
+            }
+
+            match row_action {
+                Some(BatchRowAction::Focus(index)) => {
+                    state.active_tab_id = Some(tab_id);
+                    if let Some(tab) = state.tab_mut_by_id(tab_id) {
+                        tab.selected_index = Some(index);
+                    }
+                }
+                Some(BatchRowAction::Toggle(index, value)) => {
+                    if let Some(entry) = state
+                        .batch_replace_entries
+                        .iter_mut()
+                        .find(|entry| entry.target_index == index)
+                    {
+                        entry.included = value;
+                    }
+                }
+                Some(BatchRowAction::Clear(index)) => state.clear_batch_source(index),
+                Some(BatchRowAction::Assign(index)) => {
+                    if let Some(path) = FileDialog::new()
+                        .add_filter("DDS texture", &["dds"])
+                        .pick_file()
+                    {
+                        state.assign_batch_source(index, path);
+                    }
+                }
+                Some(BatchRowAction::AssignPath(index, path)) => {
+                    state.assign_batch_source(index, path);
+                }
+                None => {}
             }
         });
 

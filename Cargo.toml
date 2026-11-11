@@ -1,6 +1,6 @@
 [package]
 name = "texembed"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Texture viewer, extractor and replacer for Split/Second (PC) .textures and .streamtex files"
 license = "MIT"
@@ -18,6 +18,7 @@ eframe = "0.29.0"
 egui = "0.29.0"
 image = { version = "0.25.0", features = ["dds"] }
 image_dds = "0.7.2"
+regex = "1.13.1"
 
 [profile.release]
 opt-level = 3
