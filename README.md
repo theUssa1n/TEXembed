@@ -49,7 +49,9 @@ Open `.textures` and `.streamtex` containers, preview every DDS inside them, exp
 - **Replace** a texture with your own DDS through a file dialog, or just **drag a DDS onto the preview thumbnail** in the Inspector. Changes stay in memory with **Undo** until you save.
 - **Batch Replace**: match a whole folder of DDS files against the open container (by name or by index) and replace everything in one step.
 - **Open folder view** and **Shared view**: browse many files at once in a single combined gallery, or open each file in its own tab.
-- **Tabs and shortcuts**: `Ctrl + Tab` switches files, `Ctrl + W` closes the current one, `Ctrl + S` saves.
+- **Tabs and shortcuts**: `Ctrl + Tab` switches files, `Ctrl + W` closes the current one, `Ctrl + S` saves, `Ctrl + F` searches.
+- **Search by name**: `Ctrl + F` opens a find box that filters the grid live (every word must match, case-insensitive). `Enter` selects the first match and `Esc` closes the search.
+- **Unsaved-changes protection**: closing the window with unsaved tabs asks whether to save and quit, quit without saving, or cancel.
 - **Cubemaps and 3D (volume) textures** are previewed as a cross layout and a flat slice atlas respectively. See [Special texture types](#special-texture-types).
 - **Legacy DDS compatibility**: obsolete `DXT2`/`DXT4` textures are normalised to `DXT3`/`DXT5`, and uncompressed `B8G8R8A8` data is decoded correctly.
 - **Optional Tweaks** that relax the strict replacement rules (different compression, size, mip count) and automatically patch the file headers, records and paired files on save.
@@ -108,6 +110,7 @@ When you drop several files at once, TEXembed asks whether to open them in **Sha
 | `Ctrl + Tab` | Switch between open files |
 | `Ctrl + W` | Close the current file |
 | `Ctrl + S` | Save changes to disk |
+| `Ctrl + F` | Search textures by name (`Enter` selects the first match, `Esc` closes) |
 
 ## Replacing textures
 

@@ -193,6 +193,11 @@ pub(super) struct AppState {
     pub(super) multi_open_shared_view: bool,
     pub(super) multi_open_include_multi_texture: bool,
     pub(super) show_close_dialog: Option<usize>,
+    pub(super) show_exit_dialog: bool,
+    pub(super) allow_app_close: bool,
+    pub(super) search_open: bool,
+    pub(super) search_query: String,
+    pub(super) search_focus_pending: bool,
     pub(super) loading: LoadingManager,
     pub(super) previous_active_tab_id: Option<usize>,
     pub(super) ipc_receiver: Option<std::sync::mpsc::Receiver<String>>,
@@ -293,6 +298,11 @@ impl Default for AppState {
             multi_open_shared_view: false,
             multi_open_include_multi_texture: true,
             show_close_dialog: None,
+            show_exit_dialog: false,
+            allow_app_close: false,
+            search_open: false,
+            search_query: String::new(),
+            search_focus_pending: false,
             loading: LoadingManager::default(),
             previous_active_tab_id: None,
             ipc_receiver: None,
@@ -788,7 +798,7 @@ impl AppState {
         }
     }
 
-    fn report_error(&mut self, message: String) {
+    pub(super) fn report_error(&mut self, message: String) {
         self.log(&message);
         if let Some(existing) = &mut self.error_message {
             if *existing != message {
@@ -2199,6 +2209,50 @@ impl AppState {
         }
     }
 
+    /// Display names of every tab that still has unsaved changes.
+    pub(super) fn unsaved_tab_titles(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.has_unsaved_changes)
+            .map(|tab| {
+                tab.file
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Untitled")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Saves every tab with unsaved changes. Stops at the first failure so the
+    /// caller can keep the application open and show the error.
+    pub(super) fn save_all_unsaved(&mut self) -> Result<usize, String> {
+        let ids: Vec<usize> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.has_unsaved_changes)
+            .map(|tab| tab.id)
+            .collect();
+        let mut saved = 0;
+        for id in ids {
+            self.save_tab_by_id(id)?;
+            saved += 1;
+        }
+        Ok(saved)
+    }
+
+    pub(super) fn open_search(&mut self) {
+        self.search_open = true;
+        self.search_focus_pending = true;
+    }
+
+    pub(super) fn close_search(&mut self) {
+        self.search_open = false;
+        self.search_query.clear();
+        self.search_focus_pending = false;
+    }
+
     pub(super) fn save_changes(&mut self) {
         let Some(tab_id) = self.active_tab_id else {
             return;
@@ -2698,8 +2752,14 @@ mod tests {
         }
         finish_loading(&mut state);
         assert_eq!(state.tabs.len(), 2);
-        assert_eq!(state.tabs[0].file.path, fs::canonicalize(first).unwrap());
-        assert_eq!(state.tabs[1].file.path, fs::canonicalize(second).unwrap());
+        assert_eq!(
+            state.tabs[0].file.path,
+            crate::runtime::canonicalize_path(&first).unwrap()
+        );
+        assert_eq!(
+            state.tabs[1].file.path,
+            crate::runtime::canonicalize_path(&second).unwrap()
+        );
         assert_eq!(state.active_tab_id, Some(state.tabs[0].id));
         assert_eq!(state.tabs[0].selected_index, Some(0));
         assert!(state.error_message.is_none());
@@ -2792,7 +2852,10 @@ mod tests {
         assert_eq!(state.loading.pending_count(), 2);
         finish_loading(&mut state);
         assert_eq!(state.tabs.len(), 3);
-        assert_eq!(state.tabs[2].file.path, fs::canonicalize(second).unwrap());
+        assert_eq!(
+            state.tabs[2].file.path,
+            crate::runtime::canonicalize_path(&second).unwrap()
+        );
         assert_eq!(state.active_tab_id, Some(target));
         assert!(state.error_message.is_none());
     }
@@ -2815,8 +2878,14 @@ mod tests {
         finish_loading(&mut state);
         assert_eq!(state.tabs.len(), 2);
         assert_ne!(state.tabs[0].id, closed);
-        assert_eq!(state.tabs[0].file.path, fs::canonicalize(first).unwrap());
-        assert_eq!(state.tabs[1].file.path, fs::canonicalize(second).unwrap());
+        assert_eq!(
+            state.tabs[0].file.path,
+            crate::runtime::canonicalize_path(&first).unwrap()
+        );
+        assert_eq!(
+            state.tabs[1].file.path,
+            crate::runtime::canonicalize_path(&second).unwrap()
+        );
         assert_eq!(state.active_tab_id, Some(state.tabs[1].id));
         assert!(state.error_message.is_none());
     }
@@ -2851,7 +2920,10 @@ mod tests {
         assert!(state.tabs.is_empty());
         finish_loading(&mut state);
         assert_eq!(state.tabs.len(), 1);
-        assert_eq!(state.tabs[0].file.path, fs::canonicalize(second).unwrap());
+        assert_eq!(
+            state.tabs[0].file.path,
+            crate::runtime::canonicalize_path(&second).unwrap()
+        );
         assert_eq!(state.active_tab_id, Some(state.tabs[0].id));
         let error = state.error_message.as_deref().unwrap();
         assert!(error.contains("first.streamtex"));
@@ -2867,7 +2939,7 @@ mod tests {
         state.load_multi_file_gallery(vec![path.clone()], true);
         finish_loading(&mut state);
         let gallery = state.active_tab_id.unwrap();
-        state.queue_file_load(fs::canonicalize(&path).unwrap());
+        state.queue_file_load(crate::runtime::canonicalize_path(&path).unwrap());
         assert_eq!(state.loading.pending_count(), 1);
         finish_loading(&mut state);
         assert_eq!(state.tabs.len(), 2);

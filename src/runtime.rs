@@ -19,6 +19,68 @@ pub fn run_guarded<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T
     }
 }
 
+/// Canonicalizes `path` like [`fs::canonicalize`], but on Windows removes the
+/// extended-length `\\?\` prefix whenever the plain form is equivalent, so
+/// paths shown in the UI, logs and error messages look like `D:\Games\file`.
+pub fn canonicalize_path(path: &Path) -> io::Result<PathBuf> {
+    let canonical = fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        if let Some(simplified) = canonical.to_str().and_then(simplify_verbatim_path) {
+            return Ok(PathBuf::from(simplified));
+        }
+    }
+    Ok(canonical)
+}
+
+/// Turns `\\?\C:\dir\file` into `C:\dir\file` and `\\?\UNC\srv\share\x` into
+/// `\\srv\share\x`. Returns `None` when the prefix must stay, which is the case
+/// for non-drive verbatim paths, paths of 260 characters or more, reserved
+/// device names, and components that only the verbatim form can address.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn simplify_verbatim_path(path: &str) -> Option<String> {
+    const MAX_PATH: usize = 260;
+    let rest = path.strip_prefix(r"\\?\")?;
+    let (simplified, first_component) = if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        (format!(r"\\{unc}"), 0)
+    } else {
+        let bytes = rest.as_bytes();
+        let is_drive_path = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\';
+        if !is_drive_path {
+            return None;
+        }
+        (rest.to_string(), 1)
+    };
+    if simplified.len() >= MAX_PATH {
+        return None;
+    }
+    let body = simplified.trim_start_matches('\\');
+    for component in body.split('\\').skip(first_component) {
+        if component.is_empty()
+            || component.ends_with(['.', ' '])
+            || component.contains(['<', '>', ':', '"', '|', '?', '*', '/'])
+            || is_reserved_device_name(component)
+        {
+            return None;
+        }
+    }
+    Some(simplified)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_reserved_device_name(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or("").trim_end();
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.len() == 4
+            && upper.as_bytes()[3].is_ascii_digit()
+            && upper.as_bytes()[3] != b'0')
+}
+
 pub fn log_timestamp() -> String {
     timestamp_at(SystemTime::now())
 }
@@ -210,7 +272,7 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir(&path).unwrap();
-            Self(path.canonicalize().unwrap())
+            Self(canonicalize_path(&path).unwrap())
         }
     }
 
@@ -353,5 +415,57 @@ mod tests {
         assert!(lock.is_poisoned());
         assert!(acquire_log_lock(&lock, true).is_some());
         assert!(acquire_log_lock(&lock, false).is_some());
+    }
+
+    #[test]
+    fn simplify_verbatim_strips_drive_and_unc_prefixes() {
+        assert_eq!(
+            simplify_verbatim_path(r"\\?\D:\SSDC\Deferred\Skydome.textures").as_deref(),
+            Some(r"D:\SSDC\Deferred\Skydome.textures")
+        );
+        assert_eq!(
+            simplify_verbatim_path(r"\\?\UNC\server\share\dir\a.textures").as_deref(),
+            Some(r"\\server\share\dir\a.textures")
+        );
+    }
+
+    #[test]
+    fn simplify_verbatim_keeps_prefix_when_plain_form_is_not_equivalent() {
+        assert_eq!(simplify_verbatim_path(r"D:\already\plain"), None);
+        assert_eq!(simplify_verbatim_path(r"\\?\Volume{1234}\file"), None);
+        assert_eq!(simplify_verbatim_path(r"\\?\D:\dir\aux.textures"), None);
+        assert_eq!(simplify_verbatim_path(r"\\?\D:\dir\NUL"), None);
+        assert_eq!(simplify_verbatim_path(r"\\?\D:\dir\com1.txt"), None);
+        assert_eq!(simplify_verbatim_path(r"\\?\D:\trailing.\file"), None);
+        assert_eq!(simplify_verbatim_path(r"\\?\D:\trailing \file"), None);
+        let long = format!(r"\\?\D:\{}", "a".repeat(300));
+        assert_eq!(simplify_verbatim_path(&long), None);
+    }
+
+    #[test]
+    fn simplify_verbatim_allows_names_that_only_resemble_reserved_ones() {
+        assert_eq!(
+            simplify_verbatim_path(r"\\?\D:\dir\console.textures").as_deref(),
+            Some(r"D:\dir\console.textures")
+        );
+        assert_eq!(
+            simplify_verbatim_path(r"\\?\D:\dir\com10.textures").as_deref(),
+            Some(r"D:\dir\com10.textures")
+        );
+        assert_eq!(
+            simplify_verbatim_path(r"\\?\D:\dir\com0.textures").as_deref(),
+            Some(r"D:\dir\com0.textures")
+        );
+    }
+
+    #[test]
+    fn canonicalize_path_resolves_existing_files_without_verbatim_prefix() {
+        let dir = TestDirectory::new();
+        let file = dir.0.join("a.textures");
+        fs::write(&file, b"x").unwrap();
+        let resolved = canonicalize_path(&file).unwrap();
+        assert!(resolved.is_absolute());
+        assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
+        assert!(canonicalize_path(&dir.0.join("missing")).is_err());
     }
 }

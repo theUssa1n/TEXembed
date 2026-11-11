@@ -92,12 +92,14 @@ fn startup_path(argument: Option<OsString>) -> Result<Option<PathBuf>, String> {
         return Err("The requested startup path is empty.".to_string());
     }
     let path = PathBuf::from(argument);
-    path.canonicalize().map(Some).map_err(|error| {
-        format!(
-            "Could not resolve the requested startup path {}: {error}",
-            path.display()
-        )
-    })
+    runtime::canonicalize_path(&path)
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "Could not resolve the requested startup path {}: {error}",
+                path.display()
+            )
+        })
 }
 
 fn show_startup_message(level: rfd::MessageLevel, message: &str) {
@@ -136,7 +138,7 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir(&path).unwrap();
-            Self(path.canonicalize().unwrap())
+            Self(runtime::canonicalize_path(&path).unwrap())
         }
     }
 
@@ -171,7 +173,7 @@ mod tests {
         let directory = TestDirectory::new();
         let path = directory.0.join("  texture_世界 .textures ");
         fs::write(&path, b"synthetic texture").unwrap();
-        let canonical = path.canonicalize().unwrap();
+        let canonical = runtime::canonicalize_path(&path).unwrap();
         let result = startup_path(Some(path.into_os_string())).unwrap().unwrap();
         assert!(result.is_absolute());
         assert_eq!(result, canonical);

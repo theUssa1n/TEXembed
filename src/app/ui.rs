@@ -27,9 +27,25 @@ fn drain_ipc_messages(receiver: &Receiver<String>) -> (Vec<String>, bool) {
     (messages, disconnected)
 }
 
+impl AppState {
+    /// Closing the window (X button, Alt+F4, taskbar) must not silently drop
+    /// unsaved edits: cancel the close and ask first.
+    pub(super) fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.viewport().close_requested())
+            && !self.allow_app_close
+            && self.tabs.iter().any(|tab| tab.has_unsaved_changes)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.show_exit_dialog = true;
+        }
+    }
+}
+
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_tooltip = None;
+
+        self.handle_close_request(ctx);
         self.process_load_results(ctx);
         self.process_ipc_messages(ctx);
         self.initialize_style(ctx);
@@ -184,5 +200,85 @@ mod tests {
         state.initialize_style(&ctx);
         assert_eq!(ctx.style().visuals.window_fill, custom);
         assert_eq!(ctx.style().visuals.widgets.inactive.bg_fill, custom);
+    }
+
+    fn run_with_close_request(state: &mut AppState) -> Vec<egui::ViewportCommand> {
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                events: vec![egui::ViewportEvent::Close],
+                ..Default::default()
+            },
+        );
+        let output = ctx.run(raw, |ctx| state.handle_close_request(ctx));
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|viewport| viewport.commands.clone())
+            .unwrap_or_default()
+    }
+
+    fn tab_with_unsaved(id: usize, unsaved: bool) -> super::super::state::Tab {
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        super::super::state::Tab {
+            id,
+            file: texembed::TextureFile {
+                file_type: texembed::FileType::Textures,
+                path: PathBuf::from(format!("file_{id}.textures")),
+                dds_list: Vec::new(),
+                original_bytes: Vec::new(),
+                streamtex_layout: None,
+            },
+            selected_index: None,
+            has_unsaved_changes: unsaved,
+            show_full_preview: false,
+            full_preview_zoom: 1.0,
+            full_preview_pan: egui::Vec2::ZERO,
+            replace_backups: HashMap::new(),
+            folder_gallery: None,
+        }
+    }
+
+    #[test]
+    fn closing_with_unsaved_tabs_is_cancelled_and_asks_first() {
+        let mut state = AppState::default();
+        state.tabs.push(tab_with_unsaved(1, false));
+        state.tabs.push(tab_with_unsaved(2, true));
+        let commands = run_with_close_request(&mut state);
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(state.show_exit_dialog);
+        assert_eq!(
+            state.unsaved_tab_titles(),
+            vec!["file_2.textures".to_string()]
+        );
+    }
+
+    #[test]
+    fn closing_without_unsaved_tabs_is_not_blocked() {
+        let mut state = AppState::default();
+        state.tabs.push(tab_with_unsaved(1, false));
+        let commands = run_with_close_request(&mut state);
+        assert!(!commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(!state.show_exit_dialog);
+    }
+
+    #[test]
+    fn confirmed_quit_is_not_blocked_again() {
+        let mut state = AppState::default();
+        state.tabs.push(tab_with_unsaved(1, true));
+        state.allow_app_close = true;
+        let commands = run_with_close_request(&mut state);
+        assert!(!commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(!state.show_exit_dialog);
+    }
+
+    #[test]
+    fn save_all_with_nothing_unsaved_is_a_no_op() {
+        let mut state = AppState::default();
+        state.tabs.push(tab_with_unsaved(1, false));
+        assert_eq!(state.save_all_unsaved(), Ok(0));
     }
 }

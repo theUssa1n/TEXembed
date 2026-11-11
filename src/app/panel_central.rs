@@ -7,6 +7,7 @@ use super::constants::{
     COLOR_PRIMARY_TRANSLUCENT, COLOR_TEXT, COLOR_TEXT_SECONDARY, THUMBNAIL_SIZE,
 };
 use super::grid_layout::{GridMetrics, GridRowKind, GroupedGridLayout};
+use super::search::SearchQuery;
 use super::state::{AboutSection, AppState, FolderGallery, PreviewState, Tab};
 use super::widgets::{
     brighten_color, ghost_button, guide_card, paint_checkerboard, paint_texture_fitted,
@@ -160,6 +161,20 @@ fn draw_about(state: &mut AppState, ui: &mut egui::Ui) {
                         );
                         ui.label(egui::RichText::new("Ctrl + W").color(COLOR_TEXT).strong().size(14.0));
                         ui.label(egui::RichText::new(".").color(COLOR_TEXT).size(14.0));
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new("Press")
+                                .color(COLOR_TEXT)
+                                .size(14.0),
+                        );
+                        ui.label(egui::RichText::new("Ctrl + F").color(COLOR_TEXT).strong().size(14.0));
+                        ui.label(
+                            egui::RichText::new("to search textures by name. The grid filters as you type, Enter selects the first match, and Esc closes the search.")
+                                .color(COLOR_TEXT)
+                                .size(14.0),
+                        );
                     });
                 });
 
@@ -1141,7 +1156,7 @@ fn draw_grid_cards(
     ui: &mut egui::Ui,
     state: &AppState,
     tab: &Tab,
-    indices: std::ops::Range<usize>,
+    indices: impl IntoIterator<Item = usize>,
     actions: &mut GridActions,
 ) {
     ui.horizontal(|ui| {
@@ -1213,6 +1228,7 @@ fn draw_grouped_grid(
     state: &AppState,
     tab: &Tab,
     gallery: &FolderGallery,
+    filter: Option<&[usize]>,
     actions: &mut GridActions,
 ) {
     egui::ScrollArea::vertical()
@@ -1228,15 +1244,34 @@ fn draw_grouped_grid(
                 header_height: ui.spacing().interact_size.y.max(22.0) + 6.0,
                 section_gap: spacing,
             };
-            let sections = (0..gallery.files.len()).map(|index| {
-                let indices = gallery
-                    .file_global_ranges
-                    .get(index)
-                    .cloned()
-                    .unwrap_or(0..0);
-                let expanded = gallery.file_expanded.get(index).copied().unwrap_or(true);
-                (indices, expanded)
-            });
+
+            // `section_files[n]` is the file shown by layout section `n`. While a
+            // search is active only files with matches get a section, their cards
+            // are positions in the sorted `found` list, and all of them are
+            // expanded so matches are never hidden behind a collapsed header.
+            let mut section_files: Vec<usize> = Vec::new();
+            let mut sections: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+            for (file_index, range) in gallery.file_global_ranges.iter().enumerate() {
+                match filter {
+                    None => {
+                        let expanded = gallery
+                            .file_expanded
+                            .get(file_index)
+                            .copied()
+                            .unwrap_or(true);
+                        section_files.push(file_index);
+                        sections.push((range.clone(), expanded));
+                    }
+                    Some(found) => {
+                        let first = found.partition_point(|&index| index < range.start);
+                        let last = found.partition_point(|&index| index < range.end);
+                        if last > first {
+                            section_files.push(file_index);
+                            sections.push((first..last, true));
+                        }
+                    }
+                }
+            }
             let layout = GroupedGridLayout::new(sections, metrics);
             ui.set_width(width);
             ui.set_height(layout.height());
@@ -1258,22 +1293,35 @@ fn draw_grouped_grid(
                 );
                 match row.kind {
                     GridRowKind::Header { section } => {
-                        let file = &gallery.files[section];
+                        let file_index = section_files[section];
+                        let file = &gallery.files[file_index];
                         let file_name = file.path.file_name().unwrap_or_default().to_string_lossy();
-                        let expanded = gallery.file_expanded.get(section).copied().unwrap_or(true);
-                        if draw_group_header(&mut row_ui, &file_name, expanded, row.height) {
-                            actions.toggle_files.push(section);
+                        let expanded = filter.is_some()
+                            || gallery
+                                .file_expanded
+                                .get(file_index)
+                                .copied()
+                                .unwrap_or(true);
+                        if draw_group_header(&mut row_ui, &file_name, expanded, row.height)
+                            && filter.is_none()
+                        {
+                            actions.toggle_files.push(file_index);
                         }
                     }
                     GridRowKind::Cards { indices, .. } => {
-                        draw_grid_cards(&mut row_ui, state, tab, indices, actions);
+                        let cards: Vec<usize> = match filter {
+                            Some(found) => found[indices].to_vec(),
+                            None => indices.collect(),
+                        };
+                        draw_grid_cards(&mut row_ui, state, tab, cards, actions);
                     }
                 }
             }
         });
 }
 
-fn draw_grid(state: &mut AppState, _ctx: &egui::Context, ui: &mut egui::Ui) {
+fn draw_grid(state: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
+    let panel_rect = ui.max_rect();
     let Some(tab) = state.active_tab() else {
         set_thumbnail_demand(state, &[]);
         ui.centered_and_justified(|ui| {
@@ -1289,33 +1337,60 @@ fn draw_grid(state: &mut AppState, _ctx: &egui::Context, ui: &mut egui::Ui) {
 
     let tab_id = tab.id;
     let mut actions = GridActions::default();
+    let total = tab
+        .folder_gallery
+        .as_ref()
+        .map_or(tab.file.dds_list.len(), |gallery| gallery.index_map.len());
+    let query = if state.search_open {
+        SearchQuery::parse(&state.search_query)
+    } else {
+        None
+    };
+    let filter: Option<Vec<usize>> = query
+        .as_ref()
+        .map(|query| super::search::matching_indices(tab, query));
+    let match_count = filter.as_ref().map_or(total, Vec::len);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
+        if filter.as_ref().is_some_and(Vec::is_empty) {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "No textures match \"{}\"",
+                        state.search_query.trim()
+                    ))
+                    .color(COLOR_TEXT_SECONDARY)
+                    .size(16.0),
+                );
+            });
+            return;
+        }
         if let Some(gallery) = tab
             .folder_gallery
             .as_ref()
             .filter(|gallery| gallery.include_multi_texture)
         {
-            draw_grouped_grid(ui, state, tab, gallery, &mut actions);
+            draw_grouped_grid(ui, state, tab, gallery, filter.as_deref(), &mut actions);
             return;
         }
 
-        let total = tab
-            .folder_gallery
-            .as_ref()
-            .map_or(tab.file.dds_list.len(), |gallery| gallery.index_map.len());
+        let shown = filter.as_ref().map_or(total, Vec::len);
         let spacing = 5.0;
         let columns = (((ui.available_width() + spacing) / (THUMBNAIL_SIZE + spacing)).floor()
             as usize)
             .max(1);
-        let row_count = total.div_ceil(columns);
+        let row_count = shown.div_ceil(columns);
         egui::ScrollArea::vertical()
             .id_salt(("textures_scroll", tab_id))
             .show_rows(ui, THUMBNAIL_SIZE + spacing, row_count, |ui, rows| {
                 for row in rows {
                     let start = row * columns;
-                    let end = start.saturating_add(columns).min(total);
-                    draw_grid_cards(ui, state, tab, start..end, &mut actions);
+                    let end = start.saturating_add(columns).min(shown);
+                    let cards: Vec<usize> = match &filter {
+                        Some(found) => found[start..end].to_vec(),
+                        None => (start..end).collect(),
+                    };
+                    draw_grid_cards(ui, state, tab, cards, &mut actions);
                     ui.add_space(spacing);
                 }
             });
@@ -1340,4 +1415,5 @@ fn draw_grid(state: &mut AppState, _ctx: &egui::Context, ui: &mut egui::Ui) {
     for index in actions.enqueue {
         state.enqueue_preview_load(tab_id, index);
     }
+    super::search::draw_bar(state, ctx, panel_rect, match_count, total);
 }

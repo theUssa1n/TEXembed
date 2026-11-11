@@ -75,6 +75,14 @@ pub(super) fn draw(state: &mut AppState, ctx: &egui::Context) {
         }
     });
 
+    let grid_visible = !state.show_about
+        && !state.show_logs
+        && !state.show_tweaks
+        && state.active_tab().is_some_and(|tab| !tab.show_full_preview);
+    if grid_visible {
+        super::search::handle_shortcut(state, ctx);
+    }
+
     if do_close_tab {
         if let Some(tab_id) = state.active_tab_id {
             state.close_tab(tab_id);
@@ -95,6 +103,7 @@ pub(super) fn draw(state: &mut AppState, ctx: &egui::Context) {
     }
 
     draw_close_dialog(state, ctx);
+    draw_exit_dialog(state, ctx);
     draw_error_dialog(state, ctx);
     draw_open_folder_options(state, ctx);
     draw_multi_open_dialog(state, ctx);
@@ -131,6 +140,83 @@ fn draw_close_dialog(state: &mut AppState, ctx: &egui::Context) {
         });
     if !close_dialog {
         state.show_close_dialog = None;
+    }
+}
+
+fn draw_exit_dialog(state: &mut AppState, ctx: &egui::Context) {
+    if !state.show_exit_dialog {
+        return;
+    }
+    let titles = state.unsaved_tab_titles();
+    if titles.is_empty() {
+        state.show_exit_dialog = false;
+        return;
+    }
+
+    let mut open = true;
+    let mut save_and_quit = false;
+    let mut quit_without_saving = false;
+    let mut cancel = false;
+    egui::Window::new("Unsaved Changes")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let count = titles.len();
+            ui.label(if count == 1 {
+                "1 tab has unsaved changes. Save it before quitting?".to_string()
+            } else {
+                format!("{count} tabs have unsaved changes. Save them before quitting?")
+            });
+            ui.add_space(6.0);
+            for title in titles.iter().take(6) {
+                ui.label(
+                    egui::RichText::new(format!("  {title}"))
+                        .color(COLOR_TEXT_SECONDARY)
+                        .size(12.0),
+                );
+            }
+            if titles.len() > 6 {
+                ui.label(
+                    egui::RichText::new(format!("  ... and {} more", titles.len() - 6))
+                        .color(COLOR_TEXT_SECONDARY)
+                        .size(12.0),
+                );
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save and quit").clicked() {
+                    save_and_quit = true;
+                }
+                if ui.button("Quit without saving").clicked() {
+                    quit_without_saving = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if save_and_quit {
+        state.log("Saving all changes before quitting...");
+        match state.save_all_unsaved() {
+            Ok(_) => {
+                state.allow_app_close = true;
+                state.show_exit_dialog = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(err) => {
+                state.show_exit_dialog = false;
+                state.report_error(format!("Error saving: {err}"));
+            }
+        }
+    } else if quit_without_saving {
+        state.allow_app_close = true;
+        state.show_exit_dialog = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    } else if cancel || !open {
+        state.show_exit_dialog = false;
     }
 }
 

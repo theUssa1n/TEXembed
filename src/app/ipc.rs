@@ -128,8 +128,7 @@ pub fn send_path_to_running_instance(path: Option<&Path>) -> Result<(), String> 
 }
 
 fn canonical_message(path: &Path) -> Result<String, String> {
-    let canonical = path
-        .canonicalize()
+    let canonical = crate::runtime::canonicalize_path(path)
         .map_err(|error| format!("Could not resolve the IPC path {}: {error}", path.display()))?;
     let message = canonical
         .to_str()
@@ -418,13 +417,13 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir(&path).unwrap();
-            Self(path.canonicalize().unwrap())
+            Self(crate::runtime::canonicalize_path(&path).unwrap())
         }
 
         fn file(&self, name: &str) -> PathBuf {
             let path = self.0.join(name);
             fs::write(&path, b"synthetic test file").unwrap();
-            path.canonicalize().unwrap()
+            crate::runtime::canonicalize_path(&path).unwrap()
         }
     }
 

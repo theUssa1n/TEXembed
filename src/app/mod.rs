@@ -8,6 +8,7 @@ pub mod panel_central;
 pub mod panels_shell;
 pub mod preview;
 mod preview_cache;
+mod search;
 pub mod state;
 pub mod ui;
 pub mod volume;

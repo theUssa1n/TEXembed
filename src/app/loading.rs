@@ -214,7 +214,7 @@ fn spawn_job(
 }
 
 fn canonical_path(path: &Path) -> Result<PathBuf, String> {
-    fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display()))
+    crate::runtime::canonicalize_path(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn load_texture_file(path: &Path) -> Result<TextureFile, String> {
@@ -451,7 +451,7 @@ mod tests {
         let path = folder.write(" leading texture_\u{0628}.textures", &streamtex_bytes(1));
         let file = load_texture_file(&path).unwrap();
         assert!(matches!(file.file_type, texembed::FileType::Streamtex));
-        assert_eq!(file.path, fs::canonicalize(path).unwrap());
+        assert_eq!(file.path, crate::runtime::canonicalize_path(&path).unwrap());
         assert_eq!(file.dds_list.len(), 1);
     }
 
@@ -463,7 +463,7 @@ mod tests {
             bytes.extend_from_slice(leading);
             bytes.extend_from_slice(&streamtex_bytes(1));
             let path = folder.write("leading.streamtex", &bytes);
-            let canonical = fs::canonicalize(&path).unwrap();
+            let canonical = crate::runtime::canonicalize_path(&path).unwrap();
             let mut manager = LoadingManager::default();
             manager.enqueue(LoadRequest::File(path.clone())).unwrap();
             manager
@@ -561,8 +561,14 @@ mod tests {
         let gallery =
             build_gallery(vec![b.clone(), a.clone(), alias], None, true, Vec::new()).unwrap();
         assert_eq!(gallery.files.len(), 2);
-        assert_eq!(gallery.files[0].path, fs::canonicalize(b).unwrap());
-        assert_eq!(gallery.files[1].path, fs::canonicalize(a).unwrap());
+        assert_eq!(
+            gallery.files[0].path,
+            crate::runtime::canonicalize_path(&b).unwrap()
+        );
+        assert_eq!(
+            gallery.files[1].path,
+            crate::runtime::canonicalize_path(&a).unwrap()
+        );
         assert_eq!(gallery.index_map, vec![(0, 0), (0, 1), (1, 0)]);
         assert_eq!(gallery.file_global_ranges, vec![0..2, 2..3]);
         assert_eq!(gallery.file_expanded, vec![true, true]);
@@ -581,8 +587,14 @@ mod tests {
         assert!(gallery.is_folder);
         assert!(!gallery.include_multi_texture);
         assert_eq!(gallery.files.len(), 2);
-        assert_eq!(gallery.files[0].path, fs::canonicalize(a).unwrap());
-        assert_eq!(gallery.files[1].path, fs::canonicalize(c).unwrap());
+        assert_eq!(
+            gallery.files[0].path,
+            crate::runtime::canonicalize_path(&a).unwrap()
+        );
+        assert_eq!(
+            gallery.files[1].path,
+            crate::runtime::canonicalize_path(&c).unwrap()
+        );
         assert_eq!(gallery.warnings.len(), 1);
         assert!(gallery.warnings[0].contains("console TEXS"));
     }
@@ -609,7 +621,7 @@ mod tests {
     fn worker_resolves_loaded_aliases_before_parsing_invalid_disk_contents() {
         let folder = TempFolder::new();
         let path = folder.write("open.streamtex", b"TEXS");
-        let canonical = fs::canonicalize(&path).unwrap();
+        let canonical = crate::runtime::canonicalize_path(&path).unwrap();
         let alias_dir = folder.0.join("alias");
         fs::create_dir(&alias_dir).unwrap();
         let alias = alias_dir.join("..").join("open.streamtex");
@@ -649,7 +661,7 @@ mod tests {
     fn existing_file_retry_stays_ahead_of_later_ready_results() {
         let folder = TempFolder::new();
         let path = folder.write("retry.streamtex", &streamtex_bytes(1));
-        let path = fs::canonicalize(path).unwrap();
+        let path = crate::runtime::canonicalize_path(&path).unwrap();
         let later = folder.0.join("later.streamtex");
         let mut manager = LoadingManager::default();
         manager.set_loaded_paths([path.clone(), later.clone()]);
