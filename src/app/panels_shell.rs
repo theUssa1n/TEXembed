@@ -4,10 +4,11 @@ use super::constants::{
     COLOR_ACCENT_ORANGE, COLOR_ACCENT_RED, COLOR_BG, COLOR_BTN_BLUE, COLOR_CARD,
     COLOR_GRAD_BLUE_BOTTOM, COLOR_GRAD_GRAY_BOTTOM, COLOR_GRAD_ORANGE_BOTTOM, COLOR_LABEL_BLUE,
     COLOR_PANEL, COLOR_PREVIEW_BG, COLOR_PRIMARY_GLOW, COLOR_PRIMARY_TRANSLUCENT, COLOR_RAIL_HOVER,
-    COLOR_RAIL_SEPARATOR, COLOR_TAB_ACTIVE, COLOR_TAB_INACTIVE, COLOR_TEXT, COLOR_TEXT_SECONDARY,
-    LEFT_PANEL_WIDTH,
+    COLOR_RAIL_SEPARATOR, COLOR_TAB_ACTIVE, COLOR_TEXT, COLOR_TEXT_SECONDARY, LEFT_PANEL_WIDTH,
 };
-use super::state::{compile_batch_pattern, AppState, BatchFilter, BatchReplaceRule, PreviewState};
+use super::state::{
+    compile_batch_pattern, AppState, BatchFilter, BatchMultiStatus, BatchReplaceRule, PreviewState,
+};
 use super::widgets::{gradient_button, paint_checkerboard, paint_texture_fitted};
 use eframe::egui;
 use egui::{Color32, CursorIcon, FontFamily, FontId, Pos2, Rect, Sense, TextureHandle, Vec2};
@@ -418,6 +419,101 @@ fn small_tool_button(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Resp
         .on_hover_cursor(CursorIcon::PointingHand)
 }
 
+/// Totals used by the multi-file Apply button: rows ready to apply across all
+/// groups, and the total number of rows across all groups.
+fn multi_group_totals(groups: &[super::state::BatchMultiGroup]) -> (usize, usize) {
+    let mut ready = 0usize;
+    let mut total = 0usize;
+    for group in groups {
+        total += group.entries.len();
+        ready += group
+            .entries
+            .iter()
+            .filter(|entry| entry.is_applicable())
+            .count();
+    }
+    (ready, total)
+}
+
+/// Draws the per-file tree shown in multi-file mode: one collapsible group per
+/// open file, with its rows and a per-file success/error status.
+fn draw_multi_file_groups(state: &mut AppState, ui: &mut egui::Ui) {
+    if state.batch_replace_groups.is_empty() {
+        ui.label(
+            egui::RichText::new(
+                "Scan the folder to map every open file, then Apply All to replace and save each file.",
+            )
+            .color(COLOR_TEXT_SECONDARY),
+        );
+        return;
+    }
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let group_count = state.batch_replace_groups.len();
+            for group_index in 0..group_count {
+                let tab_id = state.batch_replace_groups[group_index].tab_id;
+                let tab_name = state.batch_replace_groups[group_index].tab_name.clone();
+                let (status_text, status_color) =
+                    match &state.batch_replace_groups[group_index].status {
+                        BatchMultiStatus::Pending => ("Pending".to_string(), COLOR_TEXT_SECONDARY),
+                        BatchMultiStatus::Applied { count } => {
+                            (format!("Saved {count} replacement(s)"), COLOR_LABEL_BLUE)
+                        }
+                        BatchMultiStatus::Error(message) => {
+                            (format!("Error: {message}"), COLOR_ACCENT_ORANGE)
+                        }
+                    };
+                let row_count = state.batch_replace_groups[group_index].entries.len();
+
+                egui::CollapsingHeader::new(format!("{tab_name} ({row_count})"))
+                    .id_salt(("batch_multi_group", tab_id))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(status_text)
+                                .color(status_color)
+                                .size(11.0),
+                        );
+                        ui.add_space(4.0);
+
+                        let entries = &mut state.batch_replace_groups[group_index].entries;
+                        for entry in entries.iter_mut() {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut entry.included, "")
+                                    .on_hover_text("Include this row in Apply All.");
+                                entry.included = entry.included && entry.source_path.is_some();
+                                ui.label(
+                                    egui::RichText::new(&entry.target_name)
+                                        .color(COLOR_TEXT)
+                                        .size(12.0),
+                                );
+                                let source =
+                                    entry.source_name.clone().unwrap_or_else(|| "—".to_string());
+                                let source_color = if entry.source_path.is_some() {
+                                    COLOR_LABEL_BLUE
+                                } else {
+                                    COLOR_TEXT_SECONDARY
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!("← {source}"))
+                                        .color(source_color)
+                                        .size(11.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new(entry.status_label())
+                                        .color(COLOR_TEXT_SECONDARY)
+                                        .size(11.0),
+                                );
+                            });
+                        }
+                    });
+                ui.add_space(4.0);
+            }
+        });
+}
+
 #[allow(clippy::too_many_lines)]
 fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
     if !state.show_batch_replace_dialog {
@@ -516,6 +612,23 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                 });
             });
 
+            ui.add_space(10.0);
+            if ui
+                .checkbox(
+                    &mut state.batch_replace_multi_file,
+                    "Multi-file (all open tabs)",
+                )
+                .on_hover_text(
+                    "Apply the same mapping to every open file that contains textures, saving each file individually.",
+                )
+                .changed()
+            {
+                state.batch_replace_groups.clear();
+                state.batch_replace_entries.clear();
+                state.batch_replace_unused_sources.clear();
+                state.batch_replace_applied.clear();
+            }
+
             ui.add_space(12.0);
             ui.label(egui::RichText::new("Replacement DDS folder").color(COLOR_TEXT));
             ui.add_space(6.0);
@@ -550,6 +663,7 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                         state.batch_replace_folder = Some(folder_path);
                         state.batch_replace_entries.clear();
                         state.batch_replace_unused_sources.clear();
+                        state.batch_replace_groups.clear();
                     }
                 }
             });
@@ -587,6 +701,7 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                     if state.batch_replace_rule != previous_rule {
                         state.batch_replace_entries.clear();
                         state.batch_replace_unused_sources.clear();
+                        state.batch_replace_groups.clear();
                     }
 
                     if state.batch_replace_rule.is_pattern_based() {
@@ -620,6 +735,7 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                             if changed {
                                 state.batch_replace_entries.clear();
                                 state.batch_replace_unused_sources.clear();
+                                state.batch_replace_groups.clear();
                             }
                         });
                         ui.add_space(4.0);
@@ -640,6 +756,7 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                             if changed {
                                 state.batch_replace_entries.clear();
                                 state.batch_replace_unused_sources.clear();
+                                state.batch_replace_groups.clear();
                             }
                         });
                         ui.add_space(4.0);
@@ -679,6 +796,7 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                 });
 
             ui.add_space(14.0);
+            let multi_file = state.batch_replace_multi_file;
             ui.horizontal(|ui| {
                 if gradient_button(
                     ui,
@@ -689,26 +807,51 @@ fn draw_batch_replace_dialog(state: &mut AppState, ctx: &egui::Context) {
                 )
                 .clicked()
                 {
-                    state.scan_batch_replace();
+                    if multi_file {
+                        state.scan_multi_file_batch();
+                    } else {
+                        state.scan_batch_replace();
+                    }
                 }
-                if gradient_button(
-                    ui,
-                    applicable_count > 0,
-                    &format!("Apply ({applicable_count})"),
-                    Vec2::new(130.0, 28.0),
-                    COLOR_GRAD_ORANGE_BOTTOM,
-                )
-                .clicked()
-                {
-                    state.apply_batch_replace();
-                }
-                let undo_enabled = !state.batch_replace_applied.is_empty();
-                if small_tool_button(ui, undo_enabled, "Undo last batch").clicked() && undo_enabled {
-                    state.undo_last_batch_replace();
+                if multi_file {
+                    let (group_ready, group_total) = multi_group_totals(&state.batch_replace_groups);
+                    if gradient_button(
+                        ui,
+                        group_ready > 0,
+                        &format!("Apply All ({group_ready}/{group_total})"),
+                        Vec2::new(150.0, 28.0),
+                        COLOR_GRAD_ORANGE_BOTTOM,
+                    )
+                    .clicked()
+                    {
+                        state.apply_multi_file_batch();
+                    }
+                } else {
+                    if gradient_button(
+                        ui,
+                        applicable_count > 0,
+                        &format!("Apply ({applicable_count})"),
+                        Vec2::new(130.0, 28.0),
+                        COLOR_GRAD_ORANGE_BOTTOM,
+                    )
+                    .clicked()
+                    {
+                        state.apply_batch_replace();
+                    }
+                    let undo_enabled = !state.batch_replace_applied.is_empty();
+                    if small_tool_button(ui, undo_enabled, "Undo last batch").clicked() && undo_enabled
+                    {
+                        state.undo_last_batch_replace();
+                    }
                 }
             });
 
             ui.add_space(12.0);
+            if multi_file {
+                draw_multi_file_groups(state, ui);
+                return;
+            }
+
             if state.batch_replace_entries.is_empty() {
                 ui.label(
                     egui::RichText::new(
@@ -1209,112 +1352,132 @@ fn draw_top_bar(state: &mut AppState, ctx: &egui::Context) {
 
                             for tab in &state.tabs {
                                 let is_active = state.active_tab_id == Some(tab.id);
+                                let is_unsaved = tab.has_unsaved_changes;
                                 let title = tab
                                     .file
                                     .path
                                     .file_name()
                                     .and_then(|n| n.to_str())
                                     .unwrap_or("Untitled");
-                                let title = if tab.has_unsaved_changes {
-                                    format!("{title} *")
-                                } else {
-                                    title.to_string()
-                                };
-                                let is_unsaved = tab.has_unsaved_changes;
 
-                                let rounding = egui::Rounding {
-                                    nw: 6.0,
-                                    ne: 6.0,
-                                    sw: 0.0,
-                                    se: 0.0,
-                                };
-                                let bg_color = if is_active {
-                                    COLOR_TAB_ACTIVE
+                                let title_galley = ui.painter().layout_no_wrap(
+                                    title.to_string(),
+                                    egui::FontId::proportional(13.0),
+                                    COLOR_TEXT,
+                                );
+                                let close_galley = ui.painter().layout_no_wrap(
+                                    "x".to_string(),
+                                    egui::FontId::proportional(14.0),
+                                    COLOR_TEXT,
+                                );
+
+                                let pad_x = 15.0;
+                                let gap = 10.0;
+                                let close_hit = 18.0;
+                                let width = pad_x * 2.0
+                                    + title_galley.size().x
+                                    + gap
+                                    + close_galley.size().x.max(close_hit);
+                                let (rect, response) =
+                                    ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
+                                let response = response.on_hover_cursor(CursorIcon::PointingHand);
+
+                                let close_center = Pos2::new(
+                                    rect.right() - pad_x - close_galley.size().x / 2.0,
+                                    rect.center().y,
+                                );
+                                let close_rect =
+                                    Rect::from_center_size(close_center, Vec2::splat(close_hit));
+                                let close_response = ui
+                                    .interact(
+                                        close_rect,
+                                        egui::Id::new(format!("close_{}", tab.id)),
+                                        Sense::click(),
+                                    )
+                                    .on_hover_cursor(CursorIcon::PointingHand);
+
+                                let rounding = egui::Rounding::ZERO;
+                                let hovering = response.hovered();
+                                let title_color = if is_unsaved && !is_active {
+                                    COLOR_ACCENT_ORANGE
+                                } else if is_active || hovering {
+                                    COLOR_TEXT
                                 } else {
-                                    COLOR_TAB_INACTIVE
+                                    COLOR_TEXT_SECONDARY
                                 };
-                                let tab_frame = egui::Frame::none()
-                                    .fill(bg_color)
-                                    .rounding(rounding)
-                                    .inner_margin(egui::Margin::symmetric(16.0, 6.0));
-                                let response = tab_frame
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 6.0;
-                                            let title_color = if is_unsaved && !is_active {
-                                                COLOR_ACCENT_ORANGE
-                                            } else if is_active {
-                                                COLOR_TEXT
-                                            } else {
-                                                COLOR_TEXT_SECONDARY
-                                            };
-                                            let resp = ui.add(
-                                                egui::Button::new(
-                                                    egui::RichText::new(&title)
-                                                        .color(title_color)
-                                                        .size(13.0)
-                                                        .strong(),
-                                                )
-                                                .frame(false),
-                                            );
-                                            if is_unsaved {
-                                                let mut dot_pos =
-                                                    resp.rect.right_top() + egui::vec2(-6.0, 0.0);
-                                                dot_pos.y += ui
-                                                    .text_style_height(&egui::TextStyle::Body)
-                                                    / 2.0;
-                                                ui.painter().circle_filled(
-                                                    dot_pos,
-                                                    3.5,
-                                                    COLOR_ACCENT_RED,
-                                                );
-                                            }
-                                            if resp.clicked() {
-                                                tab_to_select = Some(tab.id);
-                                            }
-                                        });
-                                        ui.add_space(8.0);
-                                        let close_resp = ui.label(
-                                            egui::RichText::new("x")
-                                                .color(if is_active {
-                                                    COLOR_TEXT
-                                                } else {
-                                                    COLOR_TEXT_SECONDARY
-                                                })
-                                                .size(14.0)
-                                                .strong(),
+                                let close_color = if close_response.hovered() || is_active {
+                                    COLOR_TEXT
+                                } else {
+                                    COLOR_TEXT_SECONDARY
+                                };
+
+                                {
+                                    let painter = ui.painter();
+                                    if is_active {
+                                        painter.rect_filled(rect, rounding, COLOR_TAB_ACTIVE);
+                                        painter.rect_filled(
+                                            Rect::from_min_size(
+                                                Pos2::new(rect.left(), rect.bottom() - 2.0),
+                                                Vec2::new(rect.width(), 2.0),
+                                            ),
+                                            egui::Rounding::ZERO,
+                                            COLOR_BTN_BLUE,
                                         );
-                                        let close_resp = ui
-                                            .interact(
-                                                close_resp.rect,
-                                                egui::Id::new(format!("close_{}", tab.id)),
-                                                Sense::click(),
-                                            )
-                                            .on_hover_cursor(CursorIcon::PointingHand);
-                                        if close_resp.hovered() {
-                                            tooltip_candidate = Some((
-                                                egui::Id::new(format!("close_tt_{}", tab.id)),
-                                                "Close tab",
-                                            ));
-                                        }
-                                        if close_resp.clicked() {
-                                            tab_to_close = Some(tab.id);
-                                        }
-                                    })
-                                    .response;
+                                    } else if hovering {
+                                        painter.rect_filled(
+                                            rect,
+                                            rounding,
+                                            Color32::from_rgba_unmultiplied(255, 255, 255, 13),
+                                        );
+                                    }
+
+                                    let text_pos = Pos2::new(
+                                        rect.left() + pad_x,
+                                        rect.center().y - title_galley.size().y / 2.0,
+                                    );
+                                    painter.galley(text_pos, title_galley.clone(), title_color);
+
+                                    if is_unsaved {
+                                        painter.circle_filled(
+                                            Pos2::new(
+                                                text_pos.x + title_galley.size().x + 7.0,
+                                                rect.center().y,
+                                            ),
+                                            3.5,
+                                            COLOR_ACCENT_RED,
+                                        );
+                                    }
+
+                                    if close_response.hovered() {
+                                        painter.circle_filled(
+                                            close_center,
+                                            9.0,
+                                            Color32::from_rgba_unmultiplied(255, 255, 255, 26),
+                                        );
+                                    }
+                                    painter.galley(
+                                        Pos2::new(
+                                            close_center.x - close_galley.size().x / 2.0,
+                                            close_center.y - close_galley.size().y / 2.0,
+                                        ),
+                                        close_galley.clone(),
+                                        close_color,
+                                    );
+                                }
 
                                 if active_changed && is_active {
                                     response.scroll_to_me(Some(egui::Align::Center));
                                 }
-                                if response.hovered() && !is_active {
-                                    ui.painter().rect_stroke(
-                                        response.rect,
-                                        rounding,
-                                        egui::Stroke::new(
-                                            1.0_f32,
-                                            Color32::from_rgb(120, 170, 240),
-                                        ),
-                                    );
+                                if close_response.hovered() {
+                                    tooltip_candidate = Some((
+                                        egui::Id::new(format!("close_tt_{}", tab.id)),
+                                        "Close tab",
+                                    ));
+                                }
+                                if close_response.clicked() {
+                                    tab_to_close = Some(tab.id);
+                                } else if response.clicked() {
+                                    tab_to_select = Some(tab.id);
                                 }
                             }
 

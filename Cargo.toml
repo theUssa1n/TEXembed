@@ -1,6 +1,6 @@
 [package]
 name = "texembed"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "Texture viewer, extractor and replacer for Split/Second (PC) .textures and .streamtex files"
 license = "MIT"

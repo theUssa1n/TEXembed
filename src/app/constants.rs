@@ -18,7 +18,6 @@ pub const COLOR_CARD: Color32 = Color32::from_rgb(45, 45, 48);
 pub const COLOR_BTN_BLUE: Color32 = Color32::from_rgb(96, 165, 250);
 pub const COLOR_BTN_GRAY: Color32 = Color32::from_rgb(72, 72, 78);
 pub const COLOR_TAB_ACTIVE: Color32 = Color32::from_rgb(45, 45, 48);
-pub const COLOR_TAB_INACTIVE: Color32 = Color32::from_rgb(28, 28, 30);
 pub const COLOR_TEXT: Color32 = Color32::from_rgb(240, 240, 245);
 pub const COLOR_TEXT_SECONDARY: Color32 = Color32::from_rgb(161, 161, 170);
 pub const COLOR_LABEL_BLUE: Color32 = Color32::from_rgb(120, 170, 250);

@@ -64,6 +64,10 @@ fn run() -> Result<(), String> {
             .with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
             .with_title(APP_NAME)
             .with_icon(icon.unwrap_or_default()),
+        // eframe dithers every interpolated color by default, which shows up
+        // as grain on smooth texture previews; disabling it matches the
+        // clean scaling Paint.NET uses.
+        dithering: false,
         ..Default::default()
     };
 

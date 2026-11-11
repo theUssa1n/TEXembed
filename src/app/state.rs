@@ -87,6 +87,7 @@ impl BatchFilter {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct BatchReplaceEntry {
     pub(super) target_index: usize,
     pub(super) target_name: String,
@@ -106,12 +107,27 @@ pub(super) struct BatchReplaceEntry {
     pub(super) prepared: Option<PreparedReplacement>,
 }
 
+#[derive(Clone)]
 pub(super) enum BatchReplaceStatus {
     Ready,
     Missing,
     DuplicateSource { count: usize },
     ReadError(String),
     ValidationError(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum BatchMultiStatus {
+    Pending,
+    Applied { count: usize },
+    Error(String),
+}
+
+pub(super) struct BatchMultiGroup {
+    pub(super) tab_id: usize,
+    pub(super) tab_name: String,
+    pub(super) entries: Vec<BatchReplaceEntry>,
+    pub(super) status: BatchMultiStatus,
 }
 
 pub(super) struct Tab {
@@ -169,6 +185,10 @@ pub(super) struct AppState {
     pub(super) batch_replace_applied: Vec<usize>,
     pub(super) batch_replace_entries: Vec<BatchReplaceEntry>,
     pub(super) batch_replace_unused_sources: Vec<String>,
+    /// Multi-file scope: when enabled, the same mapping rule is applied to every
+    /// open tab (file) instead of only the tab the dialog was opened from.
+    pub(super) batch_replace_multi_file: bool,
+    pub(super) batch_replace_groups: Vec<BatchMultiGroup>,
     pub(super) multi_open_paths: Vec<std::path::PathBuf>,
     pub(super) multi_open_shared_view: bool,
     pub(super) multi_open_include_multi_texture: bool,
@@ -267,6 +287,8 @@ impl Default for AppState {
             batch_replace_applied: Vec::new(),
             batch_replace_entries: Vec::new(),
             batch_replace_unused_sources: Vec::new(),
+            batch_replace_multi_file: false,
+            batch_replace_groups: Vec::new(),
             multi_open_paths: Vec::new(),
             multi_open_shared_view: false,
             multi_open_include_multi_texture: true,
@@ -809,6 +831,7 @@ impl AppState {
         self.batch_replace_tab_id = Some(tab_id);
         self.batch_replace_entries.clear();
         self.batch_replace_unused_sources.clear();
+        self.batch_replace_groups.clear();
         self.batch_replace_applied.clear();
     }
 
@@ -980,8 +1003,6 @@ impl AppState {
             return;
         }
 
-        let total = Self::total_textures_in_tab(tab);
-
         // Pattern rules derive the target name from each source file name, so
         // the pattern is compiled once per scan and reported on failure.
         let pattern_regex = if self.batch_replace_rule.is_pattern_based() {
@@ -997,6 +1018,40 @@ impl AppState {
         };
         let template = self.batch_replace_template.clone();
 
+        let (entries, unused_sources) = Self::build_batch_entries(
+            tab,
+            self.batch_replace_rule,
+            pattern_regex.as_ref(),
+            &template,
+            &dds_paths,
+            &folder_path,
+            self.patch_header_on_replace,
+            self.streamtex_allow_resize,
+            self.resize_on_replace,
+        );
+        self.batch_replace_entries = entries;
+        self.batch_replace_unused_sources = unused_sources;
+        self.error_message = None;
+        self.log("Scanned batch replace folder.");
+    }
+
+    /// Builds the batch rows for a single tab from the scanned DDS paths. Shared
+    /// by the single-file scan and the multi-file scan so both use the exact
+    /// same matching, duplicate detection, and validation logic.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn build_batch_entries(
+        tab: &Tab,
+        rule: BatchReplaceRule,
+        pattern_regex: Option<&regex::Regex>,
+        template: &str,
+        dds_paths: &[std::path::PathBuf],
+        folder_path: &std::path::Path,
+        patch_header: bool,
+        streamtex_allow_resize: bool,
+        resize_on_replace: bool,
+    ) -> (Vec<BatchReplaceEntry>, Vec<String>) {
+        let total = Self::total_textures_in_tab(tab);
+
         // Collect the normalized key of every entry up front so index-hinted
         // source files (Export All suffixes duplicate names with "_<index>")
         // can be routed back to the exact entry they were exported from.
@@ -1004,7 +1059,7 @@ impl AppState {
             .filter_map(|index| {
                 let dds = Self::dds_by_index(tab, index)?;
                 let target_name = dds_export_name(&dds.name, index);
-                let key = match self.batch_replace_rule {
+                let key = match rule {
                     BatchReplaceRule::Index => index.to_string(),
                     _ => normalize_batch_name(&target_name),
                 };
@@ -1021,47 +1076,50 @@ impl AppState {
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            match self.batch_replace_rule {
+            match rule {
                 BatchReplaceRule::ExactName => {
                     let stem = normalize_batch_name(file_name);
                     if target_keys.iter().any(|(_, key)| *key == stem) {
-                        grouped_paths.entry(stem).or_default().push(path);
+                        grouped_paths.entry(stem).or_default().push(path.clone());
                     } else if let Some((base, claimed_index)) = split_batch_hint(&stem) {
                         let hint_matches = target_keys
                             .iter()
                             .any(|(index, key)| *index == claimed_index && *key == base);
                         if hint_matches {
-                            hinted_paths.entry(claimed_index).or_default().push(path);
+                            hinted_paths
+                                .entry(claimed_index)
+                                .or_default()
+                                .push(path.clone());
                         } else {
-                            grouped_paths.entry(stem).or_default().push(path);
+                            grouped_paths.entry(stem).or_default().push(path.clone());
                         }
                     } else {
-                        grouped_paths.entry(stem).or_default().push(path);
+                        grouped_paths.entry(stem).or_default().push(path.clone());
                     }
                 }
                 BatchReplaceRule::Index => {
                     let maybe_key = batch_index_key(file_name).map(|value| value.to_string());
                     let Some(key) = maybe_key else {
-                        unmatched_paths.push(path);
+                        unmatched_paths.push(path.clone());
                         continue;
                     };
-                    grouped_paths.entry(key).or_default().push(path);
+                    grouped_paths.entry(key).or_default().push(path.clone());
                 }
                 BatchReplaceRule::Glob | BatchReplaceRule::Regex => {
-                    let Some(regex) = pattern_regex.as_ref() else {
+                    let Some(regex) = pattern_regex else {
                         continue;
                     };
                     let Some(groups) = batch_capture_groups(regex, file_name) else {
-                        unmatched_paths.push(path);
+                        unmatched_paths.push(path.clone());
                         continue;
                     };
-                    let derived = expand_batch_template(&template, &groups);
+                    let derived = expand_batch_template(template, &groups);
                     let key = normalize_batch_name(&derived);
                     if !target_keys.iter().any(|(_, value)| *value == key) {
-                        unmatched_paths.push(path);
+                        unmatched_paths.push(path.clone());
                         continue;
                     }
-                    grouped_paths.entry(key).or_default().push(path);
+                    grouped_paths.entry(key).or_default().push(path.clone());
                 }
             }
         }
@@ -1079,7 +1137,7 @@ impl AppState {
 
             let target_name = dds_export_name(&dds.name, index);
             let target_source = Self::original_filename_in_tab(tab, index);
-            let key = match self.batch_replace_rule {
+            let key = match rule {
                 BatchReplaceRule::Index => index.to_string(),
                 _ => normalize_batch_name(&target_name),
             };
@@ -1087,7 +1145,7 @@ impl AppState {
             // Index-hinted files take priority over plain name matches so that
             // duplicate texture names stay unambiguous: a file exported as
             // "name_<index>.dds" only ever replaces the entry with that index.
-            let candidates: Vec<std::path::PathBuf> = match self.batch_replace_rule {
+            let candidates: Vec<std::path::PathBuf> = match rule {
                 BatchReplaceRule::ExactName => {
                     hinted_paths.get(&index).map_or_else(Vec::new, Clone::clone)
                 }
@@ -1139,9 +1197,9 @@ impl AppState {
                             file_type,
                             dds,
                             &bytes,
-                            self.patch_header_on_replace,
-                            self.streamtex_allow_resize,
-                            self.resize_on_replace,
+                            patch_header,
+                            streamtex_allow_resize,
+                            resize_on_replace,
                         ) {
                             Ok(prepared) => {
                                 entry.status = BatchReplaceStatus::Ready;
@@ -1168,7 +1226,7 @@ impl AppState {
             .chain(unmatched_paths.iter())
             .filter(|path| !used_sources.contains(*path))
             .map(|path| {
-                path.strip_prefix(&folder_path)
+                path.strip_prefix(folder_path)
                     .unwrap_or(path)
                     .display()
                     .to_string()
@@ -1177,10 +1235,267 @@ impl AppState {
         unused_sources.sort();
         unused_sources.dedup();
 
-        self.batch_replace_entries = entries;
-        self.batch_replace_unused_sources = unused_sources;
+        (entries, unused_sources)
+    }
+
+    /// Scans the chosen folder once and applies the active mapping rule to every
+    /// open tab, producing one row group per file. This is the multi-file
+    /// counterpart of [`Self::scan_batch_replace`].
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn scan_multi_file_batch(&mut self) {
+        let Some(folder_path) = self.batch_replace_folder.clone() else {
+            self.error_message = Some("Please choose a DDS folder first.".to_string());
+            return;
+        };
+
+        if let Err(err) = fs::read_dir(&folder_path) {
+            self.error_message = Some(err.to_string());
+            return;
+        }
+
+        let mut dds_paths: Vec<std::path::PathBuf> = Vec::new();
+        collect_dds_files(
+            &folder_path,
+            self.batch_replace_recursive,
+            0,
+            &mut dds_paths,
+        );
+        dds_paths.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+
+        if dds_paths.is_empty() {
+            self.error_message = Some(if self.batch_replace_recursive {
+                "No DDS files were found in the selected folder or its subfolders.".to_string()
+            } else {
+                "No DDS files were found in the selected replacement folder.".to_string()
+            });
+            return;
+        }
+
+        let pattern_regex = if self.batch_replace_rule.is_pattern_based() {
+            match compile_batch_pattern(self.batch_replace_rule, &self.batch_replace_pattern) {
+                Ok(regex) => Some(regex),
+                Err(err) => {
+                    self.error_message = Some(format!("Invalid match pattern: {err}"));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        let rule = self.batch_replace_rule;
+        let template = self.batch_replace_template.clone();
+        let patch_header = self.patch_header_on_replace;
+        let streamtex_allow_resize = self.streamtex_allow_resize;
+        let resize_on_replace = self.resize_on_replace;
+
+        let mut groups: Vec<BatchMultiGroup> = Vec::with_capacity(self.tabs.len());
+        for tab in &self.tabs {
+            if Self::total_textures_in_tab(tab) == 0 {
+                continue;
+            }
+            let tab_name = tab
+                .file
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map_or_else(|| tab.file.path.display().to_string(), str::to_string);
+            let (entries, _) = Self::build_batch_entries(
+                tab,
+                rule,
+                pattern_regex.as_ref(),
+                &template,
+                &dds_paths,
+                &folder_path,
+                patch_header,
+                streamtex_allow_resize,
+                resize_on_replace,
+            );
+            groups.push(BatchMultiGroup {
+                tab_id: tab.id,
+                tab_name,
+                entries,
+                status: BatchMultiStatus::Pending,
+            });
+        }
+
+        if groups.is_empty() {
+            self.error_message =
+                Some("No open files contain textures to batch replace.".to_string());
+            return;
+        }
+
+        self.batch_replace_groups = groups;
         self.error_message = None;
-        self.log("Scanned batch replace folder.");
+        self.log(&format!(
+            "Scanned folder across {} open file(s).",
+            self.batch_replace_groups.len()
+        ));
+    }
+
+    /// Applies the prepared multi-file mapping, writing and reporting per file.
+    /// The global include/assign actions all operate on the group rows, so this
+    /// simply walks every included row of every group and applies it.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn apply_multi_file_batch(&mut self) {
+        if self.batch_replace_groups.is_empty() {
+            self.error_message = Some("Scan the folder first.".to_string());
+            return;
+        }
+
+        let patch_header = self.patch_header_on_replace;
+        let streamtex_allow_resize = self.streamtex_allow_resize;
+        let resize_on_replace = self.resize_on_replace;
+
+        let groups = std::mem::take(&mut self.batch_replace_groups);
+        let mut groups: Vec<BatchMultiGroup> = groups;
+        let mut total_applied = 0usize;
+        let mut total_failed = 0usize;
+        let mut files_saved = 0usize;
+        let mut first_error: Option<String> = None;
+
+        for group in &mut groups {
+            let tab_id = group.tab_id;
+            let sources: Vec<(usize, std::path::PathBuf)> = group
+                .entries
+                .iter()
+                .filter(|entry| entry.included)
+                .filter_map(|entry| {
+                    entry
+                        .source_path
+                        .clone()
+                        .map(|path| (entry.target_index, path))
+                })
+                .collect();
+
+            if sources.is_empty() {
+                group.status = BatchMultiStatus::Applied { count: 0 };
+                continue;
+            }
+
+            let mut applied_indices: Vec<usize> = Vec::new();
+            let mut failures: Vec<String> = Vec::new();
+
+            if let Some(tab) = self.tab_mut_by_id(tab_id) {
+                for (index, path) in sources {
+                    let Some(original) = Self::dds_by_index(tab, index).cloned() else {
+                        continue;
+                    };
+                    let Some(file_type) = Self::file_type_by_index_cloned(tab, index) else {
+                        continue;
+                    };
+                    let bytes = match fs::read(&path) {
+                        Ok(bytes) => bytes,
+                        Err(err) => {
+                            failures.push(format!("{}: {err}", original.name));
+                            continue;
+                        }
+                    };
+                    let prepared = match Self::prepare_replacement_dds(
+                        &file_type,
+                        &original,
+                        &bytes,
+                        patch_header,
+                        streamtex_allow_resize,
+                        resize_on_replace,
+                    ) {
+                        Ok(prepared) => prepared,
+                        Err(err) => {
+                            failures.push(format!(
+                                "{}: {}",
+                                original.name,
+                                err.replace('\n', " | ")
+                            ));
+                            continue;
+                        }
+                    };
+                    if Self::apply_prepared_replacement_to_index(tab, index, &original, prepared)
+                        .is_some()
+                    {
+                        applied_indices.push(index);
+                    }
+                }
+                if !applied_indices.is_empty() {
+                    tab.has_unsaved_changes = true;
+                }
+            } else {
+                // The file was closed after scanning; report it instead of
+                // silently claiming a save happened.
+                failures.push("file is no longer open".to_string());
+            }
+
+            for index in &applied_indices {
+                self.invalidate_preview(tab_id, *index);
+            }
+
+            total_applied += applied_indices.len();
+
+            // Save this file immediately so the per-file report reflects the
+            // real on-disk outcome ("apply and save per file").
+            let save_result = if applied_indices.is_empty() {
+                Ok(())
+            } else {
+                self.save_tab_by_id(tab_id)
+            };
+
+            if let Err(err) = save_result {
+                failures.push(format!("save failed: {err}"));
+            } else if !applied_indices.is_empty() {
+                files_saved += 1;
+            }
+
+            total_failed += failures.len();
+            if first_error.is_none() && !failures.is_empty() {
+                first_error = Some(failures.join(" | "));
+            }
+
+            group.status = if failures.is_empty() {
+                BatchMultiStatus::Applied {
+                    count: applied_indices.len(),
+                }
+            } else {
+                BatchMultiStatus::Error(failures.join(" | "))
+            };
+        }
+
+        // Keep the single-file view in sync when it targets one of the groups.
+        if let Some(tab_id) = self.batch_replace_tab_id {
+            if let Some(group) = groups.iter().find(|group| group.tab_id == tab_id) {
+                self.batch_replace_entries = group.entries.clone();
+            }
+        }
+
+        self.batch_replace_groups = groups;
+
+        if total_applied == 0 {
+            self.error_message = Some(if let Some(error) = first_error {
+                format!("No batch replacements were applied. {error}")
+            } else {
+                "No batch replacements were applied.".to_string()
+            });
+            return;
+        }
+
+        if total_failed > 0 {
+            if let Some(error) = first_error {
+                self.error_message = Some(format!(
+                    "{total_failed} texture(s) failed and were skipped: {error}"
+                ));
+            }
+        } else {
+            self.error_message = None;
+        }
+
+        if total_failed == 0 {
+            self.log(&format!(
+                "Applied and saved multi-file batch replace to {total_applied} texture(s) across {files_saved} file(s)."
+            ));
+        } else {
+            self.log(&format!(
+                "Applied and saved multi-file batch replace to {total_applied} texture(s) across {files_saved} file(s); {total_failed} failed."
+            ));
+        }
+        // Keep the dialog open so the per-file success/error report stays visible.
     }
 
     /// Writes the current mapping to a plain-text preset file so the same set
@@ -1866,6 +2181,10 @@ impl AppState {
             self.batch_replace_entries.clear();
             self.batch_replace_unused_sources.clear();
         }
+        // Drop any multi-file group whose file is gone, otherwise Apply would
+        // report "Saved 0" for a file that was never written.
+        self.batch_replace_groups
+            .retain(|group| group.tab_id != tab_id);
     }
 
     pub(super) fn open_any_file(&mut self) {
@@ -1885,39 +2204,27 @@ impl AppState {
             return;
         };
         self.log("Saving changes...");
+        match self.save_tab_by_id(tab_id) {
+            Ok(()) => self.log("Saved changes successfully!"),
+            Err(err) => {
+                self.report_error(format!("Error saving: {err}"));
+            }
+        }
+    }
 
+    /// Saves a single tab by id to disk (either a texture file or every changed
+    /// file of a folder gallery) and clears its dirty flag on success. Shared by
+    /// the regular Save action and by the multi-file batch replace, which saves
+    /// every touched file individually.
+    pub(super) fn save_tab_by_id(&mut self, tab_id: usize) -> Result<(), String> {
         let (result, sidecar_logs) = {
-            let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
-                self.log("Error: Could not find active tab during save.");
-                return;
+            let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+                return Err(format!("Could not find file to save (tab {tab_id})."));
             };
             let patch_sidecar = self.streamtex_patch_sidecar;
             let mut sidecar_logs = Vec::new();
             let result = crate::runtime::run_guarded(|| {
-                if let Some(gallery) = &tab.folder_gallery {
-                    let mut changed_files = Vec::new();
-                    for index in tab.replace_backups.keys() {
-                        let (file_index, _) = gallery.index_map.get(*index).ok_or_else(|| {
-                            format!("Cannot save missing gallery texture {index}.")
-                        })?;
-                        changed_files.push(*file_index);
-                    }
-                    changed_files.sort_unstable();
-                    changed_files.dedup();
-                    for file_index in changed_files {
-                        let file = gallery.files.get(file_index).ok_or_else(|| {
-                            format!("Cannot save missing gallery file {file_index}.")
-                        })?;
-                        if let Some(message) = Self::save_file_with_sidecar(file, patch_sidecar)? {
-                            sidecar_logs.push(message);
-                        }
-                    }
-                } else if let Some(message) =
-                    Self::save_file_with_sidecar(&tab.file, patch_sidecar)?
-                {
-                    sidecar_logs.push(message);
-                }
-                Ok(())
+                Self::save_tab_contents(tab, patch_sidecar, &mut sidecar_logs)
             });
             (result, sidecar_logs)
         };
@@ -1926,18 +2233,46 @@ impl AppState {
             self.log(message);
         }
 
-        match result {
-            Ok(()) => {
-                if let Some(tab) = self.tab_mut_by_id(tab_id) {
-                    tab.has_unsaved_changes = false;
-                    tab.replace_backups.clear();
-                    self.log("Saved changes successfully!");
+        result?;
+
+        if let Some(tab) = self.tab_mut_by_id(tab_id) {
+            tab.has_unsaved_changes = false;
+            tab.replace_backups.clear();
+        }
+        Ok(())
+    }
+
+    /// Writes the contents of one tab (either a single texture file or every
+    /// changed file of a folder gallery) to disk.
+    fn save_tab_contents(
+        tab: &Tab,
+        patch_sidecar: bool,
+        sidecar_logs: &mut Vec<String>,
+    ) -> Result<(), String> {
+        if let Some(gallery) = &tab.folder_gallery {
+            let mut changed_files = Vec::new();
+            for index in tab.replace_backups.keys() {
+                let (file_index, _) = gallery
+                    .index_map
+                    .get(*index)
+                    .ok_or_else(|| format!("Cannot save missing gallery texture {index}."))?;
+                changed_files.push(*file_index);
+            }
+            changed_files.sort_unstable();
+            changed_files.dedup();
+            for file_index in changed_files {
+                let file = gallery
+                    .files
+                    .get(file_index)
+                    .ok_or_else(|| format!("Cannot save missing gallery file {file_index}."))?;
+                if let Some(message) = Self::save_file_with_sidecar(file, patch_sidecar)? {
+                    sidecar_logs.push(message);
                 }
             }
-            Err(err) => {
-                self.report_error(format!("Error saving: {err}"));
-            }
+        } else if let Some(message) = Self::save_file_with_sidecar(&tab.file, patch_sidecar)? {
+            sidecar_logs.push(message);
         }
+        Ok(())
     }
 
     fn save_file_with_sidecar(
@@ -2887,6 +3222,60 @@ mod tests {
         assert!(!tab.file.dds_list[0].modified);
         assert!(!tab.has_unsaved_changes);
         assert!(state.batch_replace_applied.is_empty());
+    }
+
+    #[test]
+    fn multi_file_batch_maps_every_open_tab_and_saves_each_file() {
+        let folder = TempFolder::new();
+        // Each open tab is a valid file on disk so the per-file save can run.
+        let first_path = folder.0.join("first.streamtex");
+        let second_path = folder.0.join("second.streamtex");
+        let first = stream_fixture(&first_path);
+        let second = stream_fixture(&second_path);
+
+        // One replacement file, matching index 0 of every tab under the Index rule.
+        let replacement = folder.0.join("0.dds");
+        let mut bytes = make_dxt1_dds(8, 8, 1);
+        bytes[128] = 0x7F;
+        fs::write(&replacement, &bytes).unwrap();
+
+        let mut state = AppState {
+            batch_replace_rule: BatchReplaceRule::Index,
+            batch_replace_multi_file: true,
+            batch_replace_folder: Some(folder.0.clone()),
+            ..Default::default()
+        };
+        state.load_file(first);
+        state.load_file(second);
+        assert_eq!(state.tabs.len(), 2);
+
+        state.scan_multi_file_batch();
+        assert!(state.error_message.is_none());
+        assert_eq!(state.batch_replace_groups.len(), 2);
+        for group in &state.batch_replace_groups {
+            assert!(matches!(group.status, BatchMultiStatus::Pending));
+            assert_eq!(group.entries.len(), 1);
+            assert!(group.entries[0].is_ready());
+            assert!(group.entries[0].included);
+        }
+
+        state.apply_multi_file_batch();
+        assert!(state.error_message.is_none());
+        assert_eq!(state.batch_replace_groups.len(), 2);
+        for group in &state.batch_replace_groups {
+            assert_eq!(group.status, BatchMultiStatus::Applied { count: 1 });
+        }
+
+        // Every tab was applied and saved: the in-memory entry is modified yet
+        // clean, and the byte survives a reload from disk.
+        for tab in &state.tabs {
+            assert!(tab.file.dds_list[0].modified);
+            assert!(!tab.has_unsaved_changes);
+        }
+        for path in [&first_path, &second_path] {
+            let reloaded = texembed::load_streamtex_file(path.clone()).unwrap();
+            assert_eq!(reloaded.dds_list[0].bytes[128], 0x7F);
+        }
     }
 
     #[test]

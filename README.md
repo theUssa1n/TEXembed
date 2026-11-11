@@ -142,6 +142,16 @@ Details:
 - Several entries can share the same name. **Export all as DDS** suffixes those with the entry index (for example `name_12.dds`), and Batch Replace routes such files back to their exact entry.
 - The same technical requirements apply to every file in the batch. Mismatched files are **skipped and reported**, not applied.
 
+### Multi-file Batch Replace
+
+Tick **Multi-file (all open tabs)** to apply the same mapping to **every open file** that contains textures, instead of just the current one:
+
+1. Set the replacement folder and matching rule as above, then click **Scan Folder**. Each open file is mapped separately.
+2. The dialog shows one collapsible group per file with its rows and how many are ready. Untick any row to leave it out.
+3. **Apply All (N)**: replaces the ready textures **and saves each file individually**, then reports success or an error **per file** in the group header. The dialog stays open so the per-file report stays visible.
+
+This is the quick way to push one folder of DDS files into a whole batch of `.textures` / `.streamtex` containers at once. Work on a copy of the game's files: every affected file is written to disk in one step.
+
 ## Tweaks panel
 
 The Tweaks panel (the last button on the left rail) holds advanced switches. **All of them are off by default**, which is the safest setting. Turn one on only when you understand what it does.
@@ -202,7 +212,7 @@ cd TEXembed
 cargo build --release
 ```
 
-The executable is written to `target/release/texembed.exe`. The release profile uses fat LTO, a single codegen unit, `panic = "abort"` and stripped symbols for a small, fast binary. `build.rs` embeds `icon.ico` into the executable on Windows.
+The executable is written to `target/release/texembed.exe`. The release profile uses fat LTO, a single codegen unit, `panic = "unwind"`, overflow checks and stripped symbols for a small, fast binary. `build.rs` embeds `icon.ico` into the executable on Windows.
 
 **Run**
 

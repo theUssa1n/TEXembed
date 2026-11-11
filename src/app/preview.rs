@@ -448,7 +448,11 @@ pub(super) fn upload_decoded_preview(
         ));
     }
     let image = ColorImage::from_rgba_unmultiplied(size, pixels);
-    Ok(ctx.load_texture(texture_name, image, TextureOptions::LINEAR))
+    // egui-wgpu only creates single-mip textures and its sampler ignores the
+    // mip filter, so all scaling is plain bilinear (dithering is disabled
+    // globally in main.rs to keep the preview clean).
+    let options = TextureOptions::LINEAR;
+    Ok(ctx.load_texture(texture_name, image, options))
 }
 
 pub(super) fn patch_legacy_fourcc(dds_bytes: &[u8]) -> Vec<u8> {
