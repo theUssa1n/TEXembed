@@ -4,7 +4,7 @@
 
 # TEXembed
 
-**A fast, native texture viewer, extractor and replacer for the PC version of *Split/Second: Velocity*.**
+**A fast, native texture viewer, extractor and replacer for the PC version of _Split/Second: Velocity_.**
 
 Open `.textures` and `.streamtex` containers, preview every DDS inside them, export textures, and put your own back in.
 
@@ -60,11 +60,11 @@ Open `.textures` and `.streamtex` containers, preview every DDS inside them, exp
 
 ## Supported files
 
-| Extension | Container | What TEXembed does |
-|-----------|-----------|--------------------|
-| `.textures` | `SXET` container: header, catalog table, 12-byte catalog entries, static texture records, optional `MN2C` name table | Loads embedded DDS textures, reads names, previews, exports, replaces and saves. Streamed catalogs point at records in the paired `.streamtex`. |
-| `.streamtex` | Flat sequence of `[u32 length][DDS file]` records, no header | Loads each record as a DDS, with the same preview, export, replace and save workflow. |
-| `.dds` | Standard DDS | Used for replacement and export. |
+| Extension    | Container                                                                                                            | What TEXembed does                                                                                                                              |
+| ------------ | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.textures`  | `SXET` container: header, catalog table, 12-byte catalog entries, static texture records, optional `MN2C` name table | Loads embedded DDS textures, reads names, previews, exports, replaces and saves. Streamed catalogs point at records in the paired `.streamtex`. |
+| `.streamtex` | Flat sequence of `[u32 length][DDS file]` records, no header                                                         | Loads each record as a DDS, with the same preview, export, replace and save workflow.                                                           |
+| `.dds`       | Standard DDS                                                                                                         | Used for replacement and export.                                                                                                                |
 
 Scope notes:
 
@@ -105,28 +105,28 @@ When you drop several files at once, TEXembed asks whether to open them in **Sha
 
 ### Keyboard shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl + Tab` | Switch between open files |
-| `Ctrl + W` | Close the current file |
-| `Ctrl + S` | Save changes to disk |
-| `Ctrl + F` | Search textures by name (`Enter` selects the first match, `Esc` closes) |
+| Shortcut     | Action                                                                  |
+| ------------ | ----------------------------------------------------------------------- |
+| `Ctrl + Tab` | Switch between open files                                               |
+| `Ctrl + W`   | Close the current file                                                  |
+| `Ctrl + S`   | Save changes to disk                                                    |
+| `Ctrl + F`   | Search textures by name (`Enter` selects the first match, `Esc` closes) |
 
 ## Replacing textures
 
 By default, a replacement DDS must match the original on **all three** of these:
 
-| Requirement | Rule |
-|-------------|------|
-| **Dimensions** | Width and height must match the original exactly. |
-| **Mipmaps** | The mipmap count must be identical. |
+| Requirement            | Rule                                                                                                                                      |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Dimensions**         | Width and height must match the original exactly.                                                                                         |
+| **Mipmaps**            | The mipmap count must be identical.                                                                                                       |
 | **Compression format** | The pixel format must match (for example BC1 with BC1, BC3 with BC3). Obsolete `DXT4` replacements are accepted and normalised to `DXT5`. |
 
 Mismatched files are rejected with a message in the log instead of silently corrupting the container. The three rules can be relaxed through the [Tweaks panel](#tweaks-panel) when you know what you are doing.
 
 Replacing keeps the change **in memory**. Nothing touches the original file until you save, and an **Undo** button appears as soon as there is something to undo.
 
-> **Tip:** Dithering and banding on gradients are usually caused by BC1/DXT1 compression. Replacing such a texture with an uncompressed `A8R8G8B8` (ARGB) DDS removes it. This needs the *Allow different compression* option, see below.
+> **Tip:** Dithering and banding on gradients are usually caused by BC1/DXT1 compression. Replacing such a texture with an uncompressed `A8R8G8B8` (ARGB) DDS removes it. This needs the _Allow different compression_ option, see below.
 
 ## Batch Replace
 
@@ -159,12 +159,12 @@ This is the quick way to push one folder of DDS files into a whole batch of `.te
 
 The Tweaks panel (the last button on the left rail) holds advanced switches. **All of them are off by default**, which is the safest setting. Turn one on only when you understand what it does.
 
-| Option | What it does | When to use it |
-|--------|--------------|----------------|
-| **Allow different compression for `.textures`** (patch header on save) | Lets a replacement use another compression, for example BC1 to BC3 or an uncompressed ARGB texture. On save, the record before the DDS and the catalog sizes are patched so the game loads the new format. Width, height and mip count must still match. | A replacement keeps being skipped for a compression mismatch. |
-| **Allow a different size and mip count on replace** | Accepts a replacement with another resolution and mip chain (for example 2048x2048 with a full chain instead of 1024x1024 single mip). On save, the `.textures` record and catalog sizes (or the `.streamtex` length prefix) are rewritten. | You genuinely need a different resolution. Not recommended for 3D (volume) textures, whose depth cannot be resized. |
-| **Allow different compression and size for `.streamtex` records** | Same idea for records inside a `.streamtex`. The new image is stored as-is and the record's length value is rewritten on save. ARGB replacements are reduced to mip 0 because the game's menu loader only accepts that form. | Optional and mainly meant for testing. |
-| **Auto-patch the paired `.textures` when saving a `.streamtex`** | After saving a `.streamtex`, the sibling `.textures` is updated: streamed-catalog offsets are recomputed and each record's format, mips, width and height are synced from the new DDS headers. | Keep it ON together with the option above whenever a record changes size. |
+| Option                                                                 | What it does                                                                                                                                                                                                                                             | When to use it                                                                                                      |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **Allow different compression for `.textures`** (patch header on save) | Lets a replacement use another compression, for example BC1 to BC3 or an uncompressed ARGB texture. On save, the record before the DDS and the catalog sizes are patched so the game loads the new format. Width, height and mip count must still match. | A replacement keeps being skipped for a compression mismatch.                                                       |
+| **Allow a different size and mip count on replace**                    | Accepts a replacement with another resolution and mip chain (for example 2048x2048 with a full chain instead of 1024x1024 single mip). On save, the `.textures` record and catalog sizes (or the `.streamtex` length prefix) are rewritten.              | You genuinely need a different resolution. Not recommended for 3D (volume) textures, whose depth cannot be resized. |
+| **Allow different compression and size for `.streamtex` records**      | Same idea for records inside a `.streamtex`. The new image is stored as-is and the record's length value is rewritten on save. ARGB replacements are reduced to mip 0 because the game's menu loader only accepts that form.                             | Optional and mainly meant for testing.                                                                              |
+| **Auto-patch the paired `.textures` when saving a `.streamtex`**       | After saving a `.streamtex`, the sibling `.textures` is updated: streamed-catalog offsets are recomputed and each record's format, mips, width and height are synced from the new DDS headers.                                                           | Keep it ON together with the option above whenever a record changes size.                                           |
 
 Important points:
 
@@ -184,7 +184,7 @@ Important points:
 - **Offsets matter.** The engine locates records by absolute offsets and does not walk files sequentially. If one `.streamtex` record changes size, every later record shifts, so the paired `.textures` must be updated (the auto-patch option does this). Stale offsets show up as wrong or black textures.
 - **Menu / frontend streamed loader.** It only accepts uncompressed records with a single mip level. A full mip chain can stop a vehicle from rendering at all, with no crash.
 - **About 6 MB cap for frontend and UI `.streamtex` files.** The game sets a fixed limit. A larger file cannot be handled and will crash the game.
-- **Body paint with ARGB.** For `bodypaint.textures`, use a game build that supports it (the in-app guide recommends the *SSDC v2* build). Then enable the `.textures` compression option, replace with your `A8R8G8B8` DDS, keep the same width, height and mip count, and save.
+- **Body paint with ARGB.** For `bodypaint.textures`, use a game build that supports it (the in-app guide recommends the _SSDC v2_ build). Then enable the `.textures` compression option, replace with your `A8R8G8B8` DDS, keep the same width, height and mip count, and save.
 - The tool targets the **PC** version of the game only.
 
 The app also ships its own **About** panel with the General Guide and a Dithering document, plus a format reference. Open it from the left rail.
@@ -193,10 +193,10 @@ The app also ships its own **About** panel with the General Guide and a Ditherin
 
 The [`hex_pattern`](hex_pattern) folder contains [ImHex](https://imhex.werwolv.net/) pattern files that describe both formats, derived directly from this tool's implementation:
 
-| File | Describes |
-|------|-----------|
-| [`textures.hexpat`](hex_pattern/textures.hexpat) | `.textures` (`SXET`) container: header, object table, 0x40-byte static texture records, catalog entries, embedded payloads, optional `MN2C` name table. |
-| [`streamtex.hexpat`](hex_pattern/streamtex.hexpat) | `.streamtex` length-prefixed DDS records, including the recomputed-size logic used when a stored length is slightly off. |
+| File                                               | Describes                                                                                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`textures.hexpat`](hex_pattern/textures.hexpat)   | `.textures` (`SXET`) container: header, object table, 0x40-byte static texture records, catalog entries, embedded payloads, optional `MN2C` name table. |
+| [`streamtex.hexpat`](hex_pattern/streamtex.hexpat) | `.streamtex` length-prefixed DDS records, including the recomputed-size logic used when a stored length is slightly off.                                |
 
 Load one in ImHex on top of a real file to explore the structure byte by byte.
 
@@ -286,4 +286,4 @@ Bug reports, format findings and pull requests are welcome.
 
 Released under the [MIT License](LICENSE). © 2026 Ussa1n.
 
-*Split/Second and related names are trademarks of their respective owners. TEXembed is a community tool made for modding and research purposes.*
+_Split/Second and related names are trademarks of their respective owners. TEXembed is a community tool made for modding and research purposes._
