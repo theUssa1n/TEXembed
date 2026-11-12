@@ -240,33 +240,46 @@ cargo test
 ```text
 TEXembed/
 ├── src/
-│   ├── main.rs              # entry point, single-instance IPC, window setup
+│   ├── main.rs              # entry point, single-instance setup, window creation
 │   ├── lib.rs               # public API of the format library
 │   ├── model.rs             # TextureFile / DdsInfo data model
 │   ├── dds.rs               # DDS header parsing
+│   ├── runtime.rs           # panic hook and crash.log, clean Windows paths
 │   ├── formats/
+│   │   ├── mod.rs           # format module exports
 │   │   ├── textures.rs      # .textures (SXET) load / save / patching
-│   │   └── streamtex.rs     # .streamtex load / save
+│   │   ├── streamtex.rs     # .streamtex load / save
+│   │   └── storage.rs       # safe saving: temp file and rename, paired-file rollback
 │   └── app/
-│       ├── state.rs         # application state, open/export/replace/save logic
-│       ├── ui.rs            # eframe update loop, theme and style
-│       ├── panels_shell.rs  # left rail, inspector, dialogs
-│       ├── panel_central.rs # grid, full preview, About and Tweaks panels
+│       ├── mod.rs           # app module declarations
+│       ├── state.rs         # application state, open/export/replace/save, Batch Replace logic
+│       ├── ui.rs            # eframe update loop, theme and style, close handling
+│       ├── panels_shell.rs  # top bar, left rail, status bar, dialogs (Batch Replace, exit, errors)
+│       ├── panel_central.rs # grid, full preview, About, Logs and Tweaks panels
+│       ├── inspector.rs     # Inspector: properties, thumbnail, export / replace / save actions
+│       ├── grid_layout.rs   # grouped grid layout and visible-row calculation
+│       ├── search.rs        # Ctrl + F find box and name filtering
+│       ├── loading.rs       # background loading of files and folders
 │       ├── preview.rs       # DDS decoding for previews, legacy format handling
+│       ├── preview_cache.rs # thumbnail cache and background preview decoding
 │       ├── volume.rs        # 3D texture flattening / rebuilding
 │       ├── widgets.rs       # custom buttons, cards, checkerboard
 │       ├── constants.rs     # colours and layout constants
 │       ├── icons.rs         # icon loading
 │       └── ipc.rs           # local single-instance forwarding
+├── tests/
+│   └── preservation.rs      # integration tests: saves keep untouched data byte for byte
 ├── hex_pattern/             # ImHex patterns for .textures and .streamtex
 ├── appicon.png, icon.ico    # application icon
 ├── *.png                    # left rail icons
 ├── texembed_installer.iss   # Inno Setup script
 ├── build.rs                 # Windows resource (icon) embedding
-└── Cargo.toml
+├── Cargo.toml
+├── Cargo.lock
+└── LICENSE
 ```
 
-Main dependencies: [`eframe` / `egui`](https://github.com/emilk/egui) for the UI, [`image_dds`](https://crates.io/crates/image_dds) and `ddsfile` for DDS decoding, [`image`](https://crates.io/crates/image) for PNG, [`rfd`](https://crates.io/crates/rfd) for native file dialogs, plus `anyhow`, `byteorder` and `chrono`.
+Main dependencies: [`eframe` / `egui`](https://github.com/emilk/egui) for the UI, [`image_dds`](https://crates.io/crates/image_dds) (which re-exports `ddsfile`) for DDS decoding, [`image`](https://crates.io/crates/image) for PNG, [`rfd`](https://crates.io/crates/rfd) for native file dialogs, [`regex`](https://crates.io/crates/regex) for Batch Replace name matching, plus `anyhow` and `byteorder`.
 
 ## Contributing
 
