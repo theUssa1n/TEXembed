@@ -19,6 +19,14 @@ const BASE_OFFSET: usize = 0x10;
 /// stale catalog size, shifting the marker by a small amount.
 const NAME_TABLE_SCAN_LIMIT: u64 = 0x100;
 
+/// Some externally-modded `.textures` files under-declare the catalog
+/// `texture_data_size` by a single entry length prefix (4 bytes): the payloads
+/// of their entries reach a few bytes past the declared end. The game reads
+/// each entry length and only bounds it by the end of the file, so it tolerates
+/// the overrun. This bound (in bytes) mirrors that tolerance while still
+/// rejecting data that runs past the end of the file.
+const CATALOG_END_TOLERANCE: u64 = 0x10;
+
 #[derive(Clone, Copy)]
 struct TexturesHeader {
     table_size: usize,
@@ -254,10 +262,14 @@ fn collect_dds_entries(
             continue;
         }
         let catalog_end = current_embedded_offset + u64::from(tex_data_size);
+        // Mirror the game's tolerance: an entry payload may overrun the declared
+        // catalog size by a few bytes (see `CATALOG_END_TOLERANCE`), but never
+        // past the end of the file.
+        let catalog_limit = bytes_len.min(catalog_end.saturating_add(CATALOG_END_TOLERANCE));
         for e in 0..entry_count {
             if let Some(dds) = read_embedded_dds(
                 cursor,
-                bytes_len.min(catalog_end),
+                catalog_limit,
                 current_embedded_offset,
                 entries_offset,
                 i,
@@ -486,8 +498,22 @@ fn copy_original_entry(catalog_bytes: &[u8], offset: usize) -> Result<&[u8]> {
     let prefix = checked_range(offset, 4, catalog_bytes.len(), "entry length prefix")?;
     let mut cursor = Cursor::new(&catalog_bytes[prefix.clone()]);
     let length = read_u32_as_usize(cursor.read_u32::<LittleEndian>()?, "entry length")?;
-    let payload = checked_range(prefix.end, length, catalog_bytes.len(), "entry payload")?;
-    Ok(&catalog_bytes[offset..payload.end])
+    let payload_end = prefix
+        .end
+        .checked_add(length)
+        .ok_or_else(|| anyhow!("[Textures file] entry payload overflow"))?;
+    if payload_end > catalog_bytes.len() {
+        // Tolerate the small overrun produced by externally-modded files (see
+        // `CATALOG_END_TOLERANCE`): the payload is clamped to the catalog end
+        // and the overrun bytes stay in the preserved suffix, so an unmodified
+        // save reproduces the original layout byte for byte.
+        let overrun = u64::try_from(payload_end - catalog_bytes.len())?;
+        if overrun > CATALOG_END_TOLERANCE {
+            return Err(anyhow!("[Textures file] entry payload at {offset:#X} with length {length} is out of range ({} bytes)", catalog_bytes.len()));
+        }
+        return Ok(&catalog_bytes[offset..]);
+    }
+    Ok(&catalog_bytes[offset..payload_end])
 }
 
 fn update_catalog_headers(
@@ -1079,6 +1105,103 @@ mod tests {
         let reloaded = load_textures_file(path.clone()).unwrap();
         assert_eq!(reloaded.dds_list[0].bytes.len(), 128 + 4096);
         assert_eq!(reloaded.dds_list[0].name, "BodyPaint!.dds");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Builds a two-entry `.textures` file whose declared catalog
+    /// `texture_data_size` under-counts the payloads by one length prefix
+    /// (4 bytes), mirroring `DEEZ\InGame.textures`. The last DDS payload reaches
+    /// 4 bytes past the declared catalog end, into the name-table marker.
+    fn make_overrun_textures(dds0: &[u8], dds1: &[u8]) -> Vec<u8> {
+        const REC_OFF: u32 = 0x18;
+        const CAT_OFF: u32 = REC_OFF + 2 * 0x40;
+        const ENTRIES_OFFSET: u32 = CAT_OFF + 0x10;
+        const TABLE_SIZE: u32 = ENTRIES_OFFSET + 2 * 12;
+
+        let len0 = dds0.len() as u32;
+        let len1 = dds1.len() as u32;
+        // Under-declared by 4 bytes: `sum(len) + 4 * (entry_count - 1)`.
+        let tex_data_size = len0 + len1 + 4;
+
+        let mut bytes = vec![0_u8; BASE_OFFSET + TABLE_SIZE as usize];
+        bytes[0..4].copy_from_slice(b"SXET");
+        bytes[4..8].copy_from_slice(&0x0C_u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&TABLE_SIZE.to_le_bytes());
+
+        bytes[0x10..0x14].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[0x14..0x18].copy_from_slice(&REC_OFF.to_le_bytes());
+        bytes[0x20..0x24].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[0x24..0x28].copy_from_slice(&CAT_OFF.to_le_bytes());
+
+        // Two static records.
+        bytes[0x2C..0x30].copy_from_slice(&TEST_RECORD_ID.to_le_bytes());
+        let rec1 = BASE_OFFSET + REC_OFF as usize + 0x40;
+        bytes[rec1 + 4..rec1 + 8].copy_from_slice(&(TEST_RECORD_ID + 1).to_le_bytes());
+
+        // Catalog header (offsets relative to BASE_OFFSET).
+        let cat = BASE_OFFSET + CAT_OFF as usize;
+        bytes[cat..cat + 4].copy_from_slice(&tex_data_size.to_le_bytes());
+        bytes[cat + 8..cat + 12].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[cat + 12..cat + 16].copy_from_slice(&ENTRIES_OFFSET.to_le_bytes());
+
+        // Entries (offsets relative to BASE_OFFSET).
+        let entries = BASE_OFFSET + ENTRIES_OFFSET as usize;
+        bytes[entries..entries + 4].copy_from_slice(&REC_OFF.to_le_bytes());
+        bytes[entries + 8..entries + 12].copy_from_slice(&0_u32.to_le_bytes());
+        bytes[entries + 12..entries + 16].copy_from_slice(&(REC_OFF + 0x40).to_le_bytes());
+        bytes[entries + 20..entries + 24].copy_from_slice(&(4 + len0).to_le_bytes());
+
+        // Payloads.
+        bytes.extend_from_slice(&len0.to_le_bytes());
+        bytes.extend_from_slice(dds0);
+        bytes.extend_from_slice(&len1.to_le_bytes());
+        bytes.extend_from_slice(dds1);
+
+        // The name-table marker lands at the declared catalog end, i.e. 4 bytes
+        // inside the declared span of the last payload.
+        let declared_end = BASE_OFFSET + TABLE_SIZE as usize + tex_data_size as usize;
+        assert_eq!(declared_end, bytes.len() - 4);
+        bytes[declared_end..declared_end + 4].copy_from_slice(b"MN2C");
+        bytes.extend_from_slice(&(TEST_RECORD_ID + 1).to_le_bytes());
+        bytes.extend_from_slice(&6_u32.to_le_bytes());
+        bytes.extend_from_slice(b"Second");
+        bytes
+    }
+
+    #[test]
+    fn load_and_save_tolerate_catalog_end_overrun() {
+        let dds0 = make_test_dds(8, 8, 1, u32::from_le_bytes(*b"DXT1"), 100);
+        let dds1 = make_test_dds(8, 8, 1, u32::from_le_bytes(*b"DXT1"), 64);
+        let original = make_overrun_textures(&dds0, &dds1);
+
+        let dir = make_temp_dir();
+        let path = dir.join("overrun.textures");
+        fs::write(&path, &original).unwrap();
+
+        let mut texture_file = load_textures_file(path.clone()).unwrap();
+        assert_eq!(texture_file.dds_list.len(), 2);
+        assert_eq!(texture_file.dds_list[0].bytes.len(), dds0.len());
+        assert_eq!(texture_file.dds_list[1].bytes.len(), dds1.len());
+        assert_eq!(texture_file.dds_list[1].name, "Second.dds");
+
+        // An unmodified save must reproduce the original bytes exactly, keeping
+        // the overrun payload tail and the name table intact.
+        let saved = serialize_textures(&texture_file).unwrap();
+        assert_eq!(saved, original);
+
+        // A larger replacement of the overrunning entry must still keep the
+        // name table reachable (the marker follows the rebuilt catalog).
+        let replacement = make_test_dds(8, 8, 1, u32::from_le_bytes(*b"DXT1"), 4096);
+        texture_file.dds_list[1].bytes = replacement.into();
+        texture_file.dds_list[1].modified = true;
+        let saved = serialize_textures(&texture_file).unwrap();
+        fs::write(&path, &saved).unwrap();
+
+        let reloaded = load_textures_file(path.clone()).unwrap();
+        assert_eq!(reloaded.dds_list.len(), 2);
+        assert_eq!(reloaded.dds_list[1].bytes.len(), 128 + 4096);
+        assert_eq!(reloaded.dds_list[1].name, "Second.dds");
 
         fs::remove_dir_all(dir).unwrap();
     }
